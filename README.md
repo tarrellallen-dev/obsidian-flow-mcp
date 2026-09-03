@@ -108,6 +108,13 @@ Carried from the specification, and load-bearing for anything added later:
 6. No performance claims. Measurements ship with their harness and environment block, or they do
    not ship.
 
+## Roadmap
+
+A companion backtester that replays recorded frames through the same calculators, with explicit
+fee, slippage and latency models, is planned as a separate repository after the server is proven.
+It ships with no market data; users record frames with this AddOn or import their own history.
+Design note: `docs/roadmap/backtester-companion.md`.
+
 ## Licence
 
 Apache License 2.0. See `LICENSE`.
