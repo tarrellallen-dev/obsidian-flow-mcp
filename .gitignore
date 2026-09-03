@@ -7,3 +7,7 @@ dist/
 # NinjaTrader build output. addon/ is the single writer; the copy inside NinjaTrader is not.
 bin/
 obj/
+
+# Transfer archives dropped into the folder during a session.
+*.zip
+_to_delete*
