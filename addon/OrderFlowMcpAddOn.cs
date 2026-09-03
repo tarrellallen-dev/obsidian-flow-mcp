@@ -20,7 +20,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             if (State == State.SetDefaults)
             {
                 Name = "ObsidianFlow Order-Flow MCP";
-                Description = "Publishes NinjaTrader market data over a named pipe for the Order-Flow MCP server.";
+                Description = "Obsidian Flow Order-Flow MCP by The Boy Prodigy. Publishes NinjaTrader market data over a named pipe for the Obsidian Flow Order-Flow MCP server.";
             }
             else if (State == State.Configure)
             {
@@ -59,7 +59,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                 return;
 
             _menuItem = new NTMenuItem();
-            _menuItem.Header = "Order-Flow MCP";
+            _menuItem.Header = "Obsidian Flow Order-Flow MCP";
             _menuItem.Style = Application.Current.TryFindResource("MainMenuItem") as Style;
             _menuItem.Click += OnMenuItemClick;
 

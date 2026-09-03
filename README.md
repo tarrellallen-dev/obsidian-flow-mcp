@@ -1,4 +1,6 @@
-# nt8-orderflow-mcp
+# Obsidian Flow Order-Flow MCP
+
+By The Boy Prodigy (Tarrell Allen) for Obsidian Flow, obsidianflow.tech.
 
 A Model Context Protocol server that exposes market-structure state from NinjaTrader 8 to an
 MCP client, and the NinjaTrader 8 AddOn that feeds it.

@@ -1,5 +1,6 @@
 {
-  "name": "nt8-orderflow-mcp-server",
+  "name": "obsidian-flow-orderflow-mcp-server",
+  "description": "Obsidian Flow Order-Flow MCP server by The Boy Prodigy - computed order-flow state from NinjaTrader 8 for MCP clients",
   "version": "0.2.0",
   "private": true,
   "description": "MCP server exposing NinjaTrader 8 order-flow state. Build step 2: transport and instrumentation.",

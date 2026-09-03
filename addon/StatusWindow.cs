@@ -38,7 +38,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
 
         public StatusWindow()
         {
-            Caption = "Order-Flow MCP";
+            Caption = "Obsidian Flow Order-Flow MCP";
             Width = 720;
             Height = 460;
 
