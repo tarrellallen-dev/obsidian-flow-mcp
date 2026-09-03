@@ -24,8 +24,14 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         public const int SampleCapacity = 65536;
         private const int SampleMask = SampleCapacity - 1;
 
-        private readonly string _instrumentName;
+        // Produced once by InstrumentResolver (step 2.5). Immutable; the feed's fingerprint on
+        // the wire and in the archive. A roll never mutates it: a rolled root gets a new feed.
+        private readonly InstrumentIdentity _identity;
         private readonly int _index;
+
+        // Local-clock DateTime ticks of the next session boundary, 0 when unknown. Publisher
+        // thread only; used to trigger a roll re-check at session end.
+        public long SessionBoundaryTicks;
 
         private readonly SpscRing _dataRing;
         private readonly SpscRing _depthRing;
@@ -75,19 +81,24 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
 
         private int _disposed;
 
-        public InstrumentFeed(string instrumentName, int index, int ringCapacity)
+        public InstrumentFeed(InstrumentIdentity identity, int index, int ringCapacity)
         {
-            _instrumentName = instrumentName;
+            _identity = identity;
             _index = index;
             _dataRing = new SpscRing(ringCapacity);
             _depthRing = new SpscRing(ringCapacity);
             _dataSamples = new long[SampleCapacity];
             _depthSamples = new long[SampleCapacity];
-            _tickSize = 0.0;
-            _pointValue = 0.0;
+            _tickSize = identity != null ? identity.TickSize : 0.0;
+            _pointValue = identity != null ? identity.PointValue : 0.0;
+            SessionBoundaryTicks = 0;
         }
 
-        public string InstrumentName { get { return _instrumentName; } }
+        public InstrumentIdentity Identity { get { return _identity; } }
+
+        // The resolved NT8 name (Instrument.FullName), never what the user typed.
+        public string InstrumentName { get { return _identity != null ? _identity.FullName : ""; } }
+        public string ResolvedFrom { get { return _identity != null ? _identity.ResolvedFrom : ""; } }
         public int Index { get { return _index; } }
         public SpscRing DataRing { get { return _dataRing; } }
         public SpscRing DepthRing { get { return _depthRing; } }
@@ -148,17 +159,19 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         public long DataSampleIndex { get { return Volatile.Read(ref _dataSampleIndex); } }
         public long DepthSampleIndex { get { return Volatile.Read(ref _depthSampleIndex); } }
 
-        // Called once from the AddOn worker thread. Returns false with a reason when the
-        // instrument cannot be resolved; the AddOn keeps running for the other instruments.
+        // Called once, on the AddOn worker thread at start or on the publisher thread for a
+        // roll. Never on a data thread. Returns false with a reason when the subscription cannot
+        // be made; the AddOn keeps running for the other instruments. Resolution itself happened
+        // earlier, in InstrumentResolver, and is carried in the identity.
         public bool Subscribe(out string error)
         {
             error = null;
             try
             {
-                _instrument = Instrument.GetInstrument(_instrumentName);
+                _instrument = _identity != null ? _identity.Instrument : null;
                 if (_instrument == null)
                 {
-                    error = "instrument not found: " + _instrumentName;
+                    error = "no resolved instrument";
                     return false;
                 }
 
@@ -167,6 +180,8 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                     _tickSize = _instrument.MasterInstrument.TickSize;
                     _pointValue = _instrument.MasterInstrument.PointValue;
                 }
+
+                SessionBoundaryTicks = InstrumentResolver.NextSessionEndTicks(_instrument, DateTime.Now);
 
                 _marketData = new MarketData(_instrument);
                 _marketData.Update += OnMarketDataUpdate;

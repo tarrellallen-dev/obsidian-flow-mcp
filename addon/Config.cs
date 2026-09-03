@@ -53,10 +53,14 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             Execution = null;
         }
 
+        // The default is a bare root, never a contract month: InstrumentResolver turns a root
+        // into the front contract at start and re-checks it for rolls (step 2.5). Any of the
+        // three accepted shapes may be listed: "<root> MM-YY" (used as typed), "<root>"
+        // (front contract), or a non-futures symbol (resolved directly).
         public static Config CreateDefault()
         {
             Config c = new Config();
-            c.Instruments.Add("ES 06-26");
+            c.Instruments.Add("ES");
             return c;
         }
 

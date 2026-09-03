@@ -48,11 +48,53 @@ export interface FrameHeader {
   reserved: number;
 }
 
+/** Config-entry shape the AddOn recognised (schema/wire-v1.md, "identity block", `shape`). */
+export type InstrumentShape = "fullyQualified" | "root" | "direct" | "unknown";
+
+/** How the AddOn arrived at the resolved name (`resolvedBy`). */
+export type ResolutionMethod = "asTyped" | "nt8Default" | "rolloverTable" | "nextExpiry" | "unknown";
+
+/**
+ * The fingerprint of one subscription (schema/wire-v1.md, "identity block"). Produced by the
+ * AddOn once at resolve time and once more per roll; carried in the hello and in the
+ * contractRolled event. `expiryTicks` is 0n for an instrument that does not expire.
+ */
+export interface InstrumentIdentity {
+  shape: InstrumentShape;
+  shapeCode: number;
+  resolvedBy: ResolutionMethod;
+  resolvedByCode: number;
+  /** The config entry exactly as the user typed it. */
+  resolvedFrom: string;
+  /** NinjaTrader Instrument.FullName; equals the base entry's name. */
+  fullName: string;
+  masterName: string;
+  instrumentType: string;
+  exchange: string;
+  currency: string;
+  tradingHours: string;
+  /** .NET ticks of the expiry calendar date at 00:00 (no time zone); 0n = never expires. */
+  expiryTicks: bigint;
+  tickSize: number;
+  pointValue: number;
+  /** DateTime.UtcNow ticks of the last roll in the AddOn process; 0n = never rolled. */
+  rolledAtUtc: bigint;
+  rollCount: number;
+}
+
 export interface HelloInstrument {
   index: number;
   name: string;
   tickSize: number;
   pointValue: number;
+  /** Null when the publisher predates the step-2.5 identity section. */
+  identity: InstrumentIdentity | null;
+}
+
+/** A config entry that produced no subscription; has no index and never appears in a header. */
+export interface UnresolvedInstrument {
+  typed: string;
+  reason: string;
 }
 
 export interface HelloPayload {
@@ -64,6 +106,33 @@ export interface HelloPayload {
    */
   stopwatchFrequency: bigint;
   instruments: HelloInstrument[];
+  /** False when the payload ended after the base table (step-1/step-2 publisher). */
+  identityPresent: boolean;
+  unresolved: UnresolvedInstrument[];
+}
+
+export const EventKind = {
+  ContractRolled: 1,
+} as const;
+
+export interface ContractRolledEvent {
+  eventKind: 1;
+  name: "contractRolled";
+  rolledAtUtc: bigint;
+  previous: InstrumentIdentity;
+  next: InstrumentIdentity;
+}
+
+export interface UnknownEvent {
+  eventKind: number;
+  name: "unknown";
+  bytes: number;
+}
+
+/** Frame type 2 (schema/wire-v1.md, "type 2 - event"). Unknown kinds stay opaque. */
+export interface EventPayload {
+  kind: "event";
+  event: ContractRolledEvent | UnknownEvent;
 }
 
 export interface HeartbeatPayload {
@@ -138,7 +207,7 @@ export interface UnknownPayload {
   bytes: number;
 }
 
-export type Payload = HelloPayload | HeartbeatPayload | SnapshotPayload | UnknownPayload;
+export type Payload = HelloPayload | HeartbeatPayload | SnapshotPayload | EventPayload | UnknownPayload;
 
 export interface Frame {
   header: FrameHeader;
@@ -155,6 +224,18 @@ export class WireError extends Error {
 /** Converts .NET UTC ticks to milliseconds since the Unix epoch. */
 export function dotnetTicksToUnixMs(ticks: bigint): number {
   return Number((ticks - DOTNET_TICKS_AT_UNIX_EPOCH) / 10_000n);
+}
+
+/** ISO-8601 UTC timestamp for a non-zero .NET ticks value, null for the 0n "never" sentinel. */
+export function dotnetTicksToIso(ticks: bigint): string | null {
+  if (ticks === 0n) return null;
+  return new Date(dotnetTicksToUnixMs(ticks)).toISOString();
+}
+
+/** Calendar date (YYYY-MM-DD) for an expiryTicks value, null for the 0n "never expires" sentinel. */
+export function expiryTicksToDate(ticks: bigint): string | null {
+  if (ticks === 0n) return null;
+  return new Date(dotnetTicksToUnixMs(ticks)).toISOString().slice(0, 10);
 }
 
 export function decodeHeader(buf: Buffer): FrameHeader {
@@ -206,6 +287,8 @@ export function decodeFrame(buf: Buffer): Frame {
       return { header, payload: { kind: "heartbeat" } };
     case FrameType.Snapshot:
       return { header, payload: decodeSnapshot(payload) };
+    case FrameType.Event:
+      return { header, payload: decodeEvent(payload) };
     default:
       return {
         header,
@@ -242,14 +325,167 @@ function decodeHello(payload: Buffer): HelloPayload {
     const name = payload.toString("ascii", p + 3, p + 3 + nameLen);
     const tickSize = payload.readDoubleLE(p + 3 + nameLen);
     const pointValue = payload.readDoubleLE(p + 3 + nameLen + 8);
-    instruments.push({ index, name, tickSize, pointValue });
+    instruments.push({ index, name, tickSize, pointValue, identity: null });
     p = entryEnd;
   }
 
-  if (p !== payload.length) {
-    throw new WireError(`hello has ${payload.length - p} trailing bytes`);
+  // Step-1/step-2 publisher: the payload ends with the base table.
+  if (p === payload.length) {
+    return { kind: "hello", stopwatchFrequency, instruments, identityPresent: false, unresolved: [] };
   }
-  return { kind: "hello", stopwatchFrequency, instruments };
+
+  // Step-2.5 identity section (schema/wire-v1.md, "identity section").
+  const cursor = { at: p };
+  const identityCount = readU16(payload, cursor, "hello identityCount");
+  if (identityCount !== count) {
+    throw new WireError(`hello identityCount ${identityCount} does not match count ${count}`);
+  }
+  for (let i = 0; i < identityCount; i++) {
+    const index = readU16(payload, cursor, `hello identity ${i} index`);
+    const identity = decodeIdentity(payload, cursor, `hello identity ${i}`);
+    const inst = instruments[i];
+    if (!inst || inst.index !== index) {
+      throw new WireError(`hello identity ${i} names index ${index}, base entry has ${inst?.index}`);
+    }
+    if (identity.fullName !== inst.name) {
+      throw new WireError(
+        `hello identity ${i} fullName "${identity.fullName}" differs from base name "${inst.name}"`,
+      );
+    }
+    inst.identity = identity;
+  }
+
+  const unresolvedCount = readU16(payload, cursor, "hello unresolvedCount");
+  const unresolved: UnresolvedInstrument[] = [];
+  for (let i = 0; i < unresolvedCount; i++) {
+    const typed = readStr8(payload, cursor, `hello unresolved ${i} typed`);
+    const reason = readStr8(payload, cursor, `hello unresolved ${i} reason`);
+    unresolved.push({ typed, reason });
+  }
+
+  if (cursor.at !== payload.length) {
+    throw new WireError(`hello has ${payload.length - cursor.at} trailing bytes`);
+  }
+  return { kind: "hello", stopwatchFrequency, instruments, identityPresent: true, unresolved };
+}
+
+interface Cursor {
+  at: number;
+}
+
+function need(payload: Buffer, cursor: Cursor, bytes: number, what: string): void {
+  if (cursor.at + bytes > payload.length) {
+    throw new WireError(`${what}: truncated at byte ${cursor.at}`);
+  }
+}
+
+function readU8(payload: Buffer, cursor: Cursor, what: string): number {
+  need(payload, cursor, 1, what);
+  const v = payload.readUInt8(cursor.at);
+  cursor.at += 1;
+  return v;
+}
+
+function readU16(payload: Buffer, cursor: Cursor, what: string): number {
+  need(payload, cursor, 2, what);
+  const v = payload.readUInt16LE(cursor.at);
+  cursor.at += 2;
+  return v;
+}
+
+function readI64(payload: Buffer, cursor: Cursor, what: string): bigint {
+  need(payload, cursor, 8, what);
+  const v = payload.readBigInt64LE(cursor.at);
+  cursor.at += 8;
+  return v;
+}
+
+function readF64(payload: Buffer, cursor: Cursor, what: string): number {
+  need(payload, cursor, 8, what);
+  const v = payload.readDoubleLE(cursor.at);
+  cursor.at += 8;
+  return v;
+}
+
+function readStr8(payload: Buffer, cursor: Cursor, what: string): string {
+  const len = readU8(payload, cursor, what);
+  need(payload, cursor, len, what);
+  const s = payload.toString("ascii", cursor.at, cursor.at + len);
+  cursor.at += len;
+  return s;
+}
+
+const SHAPES: Record<number, InstrumentShape> = { 1: "fullyQualified", 2: "root", 3: "direct" };
+const METHODS: Record<number, ResolutionMethod> = {
+  1: "asTyped",
+  2: "nt8Default",
+  3: "rolloverTable",
+  4: "nextExpiry",
+};
+
+/** Identity block (schema/wire-v1.md, "identity block"): 43 fixed bytes plus seven strings. */
+export function decodeIdentity(payload: Buffer, cursor: Cursor, what: string): InstrumentIdentity {
+  const shapeCode = readU8(payload, cursor, `${what} shape`);
+  const resolvedByCode = readU8(payload, cursor, `${what} resolvedBy`);
+  const resolvedFrom = readStr8(payload, cursor, `${what} resolvedFrom`);
+  const fullName = readStr8(payload, cursor, `${what} fullName`);
+  const masterName = readStr8(payload, cursor, `${what} masterName`);
+  const instrumentType = readStr8(payload, cursor, `${what} instrumentType`);
+  const exchange = readStr8(payload, cursor, `${what} exchange`);
+  const currency = readStr8(payload, cursor, `${what} currency`);
+  const tradingHours = readStr8(payload, cursor, `${what} tradingHours`);
+  const expiryTicks = readI64(payload, cursor, `${what} expiryTicks`);
+  const tickSize = readF64(payload, cursor, `${what} tickSize`);
+  const pointValue = readF64(payload, cursor, `${what} pointValue`);
+  const rolledAtUtc = readI64(payload, cursor, `${what} rolledAtUtc`);
+  const rollCount = readU16(payload, cursor, `${what} rollCount`);
+  return {
+    shape: SHAPES[shapeCode] ?? "unknown",
+    shapeCode,
+    resolvedBy: METHODS[resolvedByCode] ?? "unknown",
+    resolvedByCode,
+    resolvedFrom,
+    fullName,
+    masterName,
+    instrumentType,
+    exchange,
+    currency,
+    tradingHours,
+    expiryTicks,
+    tickSize,
+    pointValue,
+    rolledAtUtc,
+    rollCount,
+  };
+}
+
+/** u16 eventKind + u16 reserved, before the body. */
+export const EVENT_HEADER_BYTES = 4;
+
+function decodeEvent(payload: Buffer): EventPayload {
+  if (payload.length < EVENT_HEADER_BYTES) {
+    throw new WireError("event payload shorter than its fixed header");
+  }
+  const eventKind = payload.readUInt16LE(0);
+  const cursor: Cursor = { at: EVENT_HEADER_BYTES };
+
+  if (eventKind === EventKind.ContractRolled) {
+    const rolledAtUtc = readI64(payload, cursor, "contractRolled rolledAtUtc");
+    const previous = decodeIdentity(payload, cursor, "contractRolled previous");
+    const next = decodeIdentity(payload, cursor, "contractRolled next");
+    if (cursor.at !== payload.length) {
+      throw new WireError(`contractRolled has ${payload.length - cursor.at} trailing bytes`);
+    }
+    return {
+      kind: "event",
+      event: { eventKind: EventKind.ContractRolled, name: "contractRolled", rolledAtUtc, previous, next },
+    };
+  }
+
+  return {
+    kind: "event",
+    event: { eventKind, name: "unknown", bytes: payload.length - EVENT_HEADER_BYTES },
+  };
 }
 
 /** Step-1 snapshot payload: 24 bytes, three u64 counters. */

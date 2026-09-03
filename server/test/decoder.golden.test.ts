@@ -42,19 +42,37 @@ describe("wire v1 golden files", () => {
     expect(h.reserved).toBe(0);
   });
 
-  it("decodes hello with its instrument table", () => {
-    const frame = decodeFrame(golden("hello.bin"));
+  // Instrument names in the golden files are EXAMPLES (schema/wire-v1.md); the AddOn
+  // hardcodes no contract month.
+  it("decodes the step-2 base-table hello, identities absent", () => {
+    const frame = decodeFrame(golden("hello-base.bin"));
     expect(frame.header.type).toBe(FrameType.Hello);
     expect(frame.header.instrument).toBe(INSTRUMENT_NONE);
     if (frame.payload.kind !== "hello") throw new Error("expected hello");
 
     expect(frame.payload.stopwatchFrequency).toBe(10_000_000n);
+    expect(frame.payload.identityPresent).toBe(false);
+    expect(frame.payload.unresolved).toEqual([]);
     expect(frame.payload.instruments).toEqual([
-      { index: 0, name: "ES 06-26", tickSize: 0.25, pointValue: 50 },
-      { index: 1, name: "NQ 06-26", tickSize: 0.25, pointValue: 20 },
+      { index: 0, name: "ES 06-26", tickSize: 0.25, pointValue: 50, identity: null },
+      { index: 1, name: "NQ 06-26", tickSize: 0.25, pointValue: 20, identity: null },
     ]);
     // 4 length + 32 header + 10 hello header + two entries of 19 + 8 name bytes.
-    expect(golden("hello.bin").length).toBe(4 + HEADER_BYTES + HELLO_HEADER_BYTES + 2 * (19 + 8));
+    expect(golden("hello-base.bin").length).toBe(4 + HEADER_BYTES + HELLO_HEADER_BYTES + 2 * (19 + 8));
+  });
+
+  it("decodes the step-2.5 hello with its identity section", () => {
+    const frame = decodeFrame(golden("hello.bin"));
+    if (frame.payload.kind !== "hello") throw new Error("expected hello");
+    expect(frame.payload.identityPresent).toBe(true);
+    expect(frame.payload.instruments.map((i) => [i.index, i.name, i.identity?.resolvedFrom])).toEqual([
+      [0, "ES 12-26", "ES"],
+      [1, "NQ 03-27", "NQ 03-27"],
+      [2, "EURUSD", "EURUSD"],
+    ]);
+    expect(frame.payload.unresolved).toEqual([
+      { typed: "XYZ", reason: "not in the NinjaTrader instrument database: XYZ" },
+    ]);
   });
 
   it("decodes an empty hello", () => {
@@ -62,6 +80,7 @@ describe("wire v1 golden files", () => {
     if (frame.payload.kind !== "hello") throw new Error("expected hello");
     expect(frame.payload.stopwatchFrequency).toBe(10_000_000n);
     expect(frame.payload.instruments).toEqual([]);
+    expect(frame.payload.identityPresent).toBe(false);
   });
 
   it("rejects a hello declaring a non-positive stopwatchFrequency", () => {

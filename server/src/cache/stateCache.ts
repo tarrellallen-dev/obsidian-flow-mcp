@@ -10,9 +10,11 @@ import type {
   Frame,
   HandlerLatency,
   HelloInstrument,
+  InstrumentIdentity,
   SnapshotPayload,
+  UnresolvedInstrument,
 } from "../wire/decoder.js";
-import { FrameType } from "../wire/decoder.js";
+import { FrameType, dotnetTicksToIso, expiryTicksToDate } from "../wire/decoder.js";
 
 export type Freshness = "live" | "stale" | "reconnecting";
 
@@ -28,11 +30,29 @@ export interface CachedEvent {
   detail: string;
 }
 
+/**
+ * Per-instrument resolution state, for the health tool. "rolled" means the AddOn re-resolved a
+ * bare root to a different contract at `rolledAt`, either on this connection (a contractRolled
+ * event was seen) or earlier in the AddOn process (the hello identity carried rolledAtUtc).
+ */
+export interface ResolutionState {
+  state: "resolved" | "rolled" | "unresolved" | "identity-absent";
+  rolledAt: string | null;
+  rollCount: number;
+  /** fullName of the contract this slot held before the last roll seen on this connection. */
+  previousName: string | null;
+  reason: string | null;
+}
+
 export interface InstrumentSlot {
   index: number;
   name: string;
   tickSize: number;
   pointValue: number;
+  /** Null when the publisher predates the identity section. */
+  identity: InstrumentIdentity | null;
+  /** Previous identity when a contractRolled event was seen on this connection. */
+  previousIdentity: InstrumentIdentity | null;
   /** Last decoded snapshot payload, null until the first snapshot for this instrument. */
   snapshot: SnapshotPayload | null;
   /** process.hrtime.bigint() when the last snapshot was received. */
@@ -55,11 +75,37 @@ export interface Staleness {
   oneWayEstimateBasis: "heartbeat-cadence-min-filter" | "insufficient-heartbeats";
 }
 
+/** The identity block with ticks rendered as dates; what `instruments` returns per entry. */
+export interface IdentityView {
+  resolvedFrom: string;
+  shape: string;
+  resolvedBy: string;
+  fullName: string;
+  masterName: string;
+  instrumentType: string;
+  exchange: string;
+  currency: string;
+  tradingHours: string;
+  /** YYYY-MM-DD, or null when the instrument does not expire. */
+  expiry: string | null;
+  expiryTicks: string;
+  tickSize: number;
+  pointValue: number;
+  rolledAt: string | null;
+  rollCount: number;
+}
+
 export interface InstrumentView {
   index: number;
   name: string;
+  /** What the user typed in the AddOn config; equals name when identity is absent. */
+  resolvedFrom: string;
+  /** YYYY-MM-DD, null when the instrument does not expire or identity is absent. */
+  expiry: string | null;
   tickSize: number;
   pointValue: number;
+  identity: IdentityView | null;
+  resolution: ResolutionState;
   freshness: Freshness;
   staleness: Staleness;
   sequence: number;
@@ -117,12 +163,28 @@ export interface InstrumentLatencyView {
   droppedTotal: number;
 }
 
+/** One line per config entry in the health tool. */
+export interface InstrumentHealth {
+  resolvedFrom: string;
+  name: string | null;
+  index: number | null;
+  state: ResolutionState["state"];
+  reason: string | null;
+  rolledAt: string | null;
+  rollCount: number;
+  previousName: string | null;
+}
+
 export interface CacheHealth {
   pipeState: string;
   endpoint: string;
   helloReceived: boolean;
   connectionCount: number;
   instrumentCount: number;
+  unresolvedCount: number;
+  /** Hellos on the current connection beyond the first: one per roll re-announcement. */
+  helloReannouncements: number;
+  instruments: InstrumentHealth[];
   framesReceived: number;
   lastFrameStaleness: Staleness;
   stopwatchFrequency: string | null;
@@ -144,6 +206,8 @@ const NS_PER_SECOND = 1_000_000_000n;
 
 export class StateCache {
   private readonly slots = new Map<number, InstrumentSlot>();
+  private unresolved: UnresolvedInstrument[] = [];
+  private helloReannouncementsValue = 0;
   private readonly events: CachedEvent[] = [];
   private readonly eventRingSize: number;
   private readonly staleAfterMs: number;
@@ -196,6 +260,14 @@ export class StateCache {
     return this.stopwatchFrequencyValue;
   }
 
+  get helloReannouncements(): number {
+    return this.helloReannouncementsValue;
+  }
+
+  get unresolvedInstruments(): UnresolvedInstrument[] {
+    return [...this.unresolved];
+  }
+
   setEndpoint(endpoint: string): void {
     this.endpointValue = endpoint;
   }
@@ -215,6 +287,7 @@ export class StateCache {
   onConnect(): void {
     this.connectionCountValue++;
     this.helloReceivedValue = false;
+    this.helloReannouncementsValue = 0;
     this.lastFrameAtNs = null;
     this.resetStalenessEstimator();
     for (const slot of this.slots.values()) {
@@ -271,24 +344,115 @@ export class StateCache {
       slot.offsetNs = offsetNs;
       slot.sequence = frame.header.sequence;
       slot.droppedTotal += frame.header.ringEventsDropped;
+      return;
+    }
+
+    if (frame.header.type === FrameType.Event && frame.payload.kind === "event") {
+      this.applyEvent(frame);
     }
   }
 
+  /**
+   * Discrete events (schema/wire-v1.md, "type 2 - event"). contractRolled marks the boundary
+   * for one index: the slot's cached snapshot belongs to the previous contract and is
+   * discarded, the previous identity is kept for the health tool, and the event goes into the
+   * ring so events_recent can show it. The identity itself was already replaced by the
+   * re-announced hello that precedes the event; if the event arrives first (it should not),
+   * the identity is taken from the event so the two are never out of step.
+   */
+  private applyEvent(frame: Frame): void {
+    if (frame.payload.kind !== "event") return;
+    const ev = frame.payload.event;
+
+    if (ev.name === "contractRolled") {
+      const slot = this.slots.get(frame.header.instrument);
+      if (!slot) {
+        this.ignoredBeforeHello++;
+        return;
+      }
+      slot.previousIdentity = ev.previous;
+      if (slot.identity === null || slot.identity.fullName !== ev.next.fullName) {
+        slot.identity = ev.next;
+        slot.name = ev.next.fullName;
+        slot.tickSize = ev.next.tickSize;
+        slot.pointValue = ev.next.pointValue;
+      }
+      slot.snapshot = null;
+      slot.receivedAtNs = null;
+      slot.offsetNs = null;
+      slot.sequence = frame.header.sequence;
+      this.pushEvent(
+        "contractRolled",
+        `${ev.previous.resolvedFrom}: ${ev.previous.fullName} -> ${ev.next.fullName} at ${dotnetTicksToIso(ev.rolledAtUtc) ?? "?"} (index ${frame.header.instrument}, sequence ${frame.header.sequence})`,
+      );
+      return;
+    }
+
+    this.pushEvent("unknownEvent", `eventKind ${ev.eventKind}, ${ev.bytes} byte(s)`);
+  }
+
+  /**
+   * First hello on a connection: rebuild the table. A later hello on the same connection is a
+   * re-announcement after a roll (schema/wire-v1.md, "re-announcement"): indices are
+   * re-validated against the new table rather than the table being thrown away. An index that
+   * disappeared is dropped; an index whose fullName changed starts a new series with a blank
+   * slot (the previous identity is remembered); an unchanged index keeps its snapshot and
+   * counters.
+   */
   private applyHello(frame: Frame): void {
     if (frame.payload.kind !== "hello") return;
 
-    this.slots.clear();
-    for (const inst of frame.payload.instruments) {
-      this.slots.set(inst.index, blankSlot(inst));
+    const reannounce = this.helloReceivedValue;
+    if (!reannounce) {
+      this.slots.clear();
+      for (const inst of frame.payload.instruments) {
+        this.slots.set(inst.index, blankSlot(inst));
+      }
+    } else {
+      this.helloReannouncementsValue++;
+      const next = new Map<number, InstrumentSlot>();
+      let replaced = 0;
+      for (const inst of frame.payload.instruments) {
+        const existing = this.slots.get(inst.index);
+        if (existing && existing.name === inst.name) {
+          // Same contract: keep the series. Refresh identity fields (rollCount etc.) in case
+          // the publisher's copy moved on without a change of contract.
+          if (inst.identity) existing.identity = inst.identity;
+          next.set(inst.index, existing);
+          continue;
+        }
+        const fresh = blankSlot(inst);
+        if (existing) {
+          fresh.previousIdentity = existing.identity;
+          fresh.droppedTotal = 0;
+          replaced++;
+        }
+        next.set(inst.index, fresh);
+      }
+      const dropped = [...this.slots.keys()].filter((i) => !next.has(i)).length;
+      this.slots.clear();
+      for (const [index, slot] of next) this.slots.set(index, slot);
+      this.pushEvent(
+        "helloReannounced",
+        `${frame.payload.instruments.length} instrument(s), ${replaced} replaced, ${dropped} dropped`,
+      );
     }
+
+    this.unresolved = [...frame.payload.unresolved];
     this.helloReceivedValue = true;
     this.framesReceivedValue++;
     this.lastFrameAtNs = this.now();
     this.pipeStateValue = "connected";
-    this.resetStalenessEstimator();
-    this.stopwatchFrequencyValue = frame.payload.stopwatchFrequency;
+    if (!reannounce) {
+      this.resetStalenessEstimator();
+      this.stopwatchFrequencyValue = frame.payload.stopwatchFrequency;
+      this.pushEvent(
+        "hello",
+        `${frame.payload.instruments.length} instrument(s), ${frame.payload.unresolved.length} unresolved` +
+          (frame.payload.identityPresent ? "" : ", identity section absent (pre-2.5 publisher)"),
+      );
+    }
     this.lastFrameOffsetNs = this.observeOffset(frame.header.sentTicks, this.lastFrameAtNs);
-    this.pushEvent("hello", `${frame.payload.instruments.length} instrument(s)`);
   }
 
   private resetStalenessEstimator(): void {
@@ -357,11 +521,35 @@ export class StateCache {
     return slot ? this.viewOf(slot) : null;
   }
 
+  /** Matches the resolved name first, then what the user typed (e.g. a bare root). */
   viewInstrumentByName(name: string): InstrumentView | null {
+    const slot = this.findSlot(name);
+    return slot ? this.viewOf(slot) : null;
+  }
+
+  private findSlot(name: string): InstrumentSlot | null {
     for (const slot of this.slots.values()) {
-      if (slot.name === name) return this.viewOf(slot);
+      if (slot.name === name) return slot;
+    }
+    for (const slot of this.slots.values()) {
+      if (slot.identity && slot.identity.resolvedFrom === name) return slot;
     }
     return null;
+  }
+
+  private resolutionOf(slot: InstrumentSlot): ResolutionState {
+    const id = slot.identity;
+    if (id === null) {
+      return { state: "identity-absent", rolledAt: null, rollCount: 0, previousName: null, reason: null };
+    }
+    const rolledAt = dotnetTicksToIso(id.rolledAtUtc);
+    return {
+      state: id.rollCount > 0 || slot.previousIdentity !== null ? "rolled" : "resolved",
+      rolledAt,
+      rollCount: id.rollCount,
+      previousName: slot.previousIdentity ? slot.previousIdentity.fullName : null,
+      reason: null,
+    };
   }
 
   viewInstruments(): InstrumentView[] {
@@ -372,11 +560,16 @@ export class StateCache {
 
   private viewOf(slot: InstrumentSlot): InstrumentView {
     const snapshot = slot.snapshot;
+    const id = slot.identity;
     return {
       index: slot.index,
       name: slot.name,
+      resolvedFrom: id ? id.resolvedFrom : slot.name,
+      expiry: id ? expiryTicksToDate(id.expiryTicks) : null,
       tickSize: slot.tickSize,
       pointValue: slot.pointValue,
+      identity: id ? identityView(id) : null,
+      resolution: this.resolutionOf(slot),
       freshness: this.freshnessFor(slot),
       staleness: this.stalenessOf(slot.receivedAtNs, slot.offsetNs),
       sequence: slot.sequence,
@@ -394,10 +587,8 @@ export class StateCache {
   }
 
   viewLatencyByName(name: string): InstrumentLatencyView | null {
-    for (const slot of this.slots.values()) {
-      if (slot.name === name) return this.latencyOf(slot);
-    }
-    return null;
+    const slot = this.findSlot(name);
+    return slot ? this.latencyOf(slot) : null;
   }
 
   private latencyOf(slot: InstrumentSlot): InstrumentLatencyView {
@@ -440,12 +631,43 @@ export class StateCache {
       }
     }
 
+    const instruments: InstrumentHealth[] = [...this.slots.values()]
+      .sort((a, b) => a.index - b.index)
+      .map((slot) => {
+        const r = this.resolutionOf(slot);
+        return {
+          resolvedFrom: slot.identity ? slot.identity.resolvedFrom : slot.name,
+          name: slot.name,
+          index: slot.index,
+          state: r.state,
+          reason: r.reason,
+          rolledAt: r.rolledAt,
+          rollCount: r.rollCount,
+          previousName: r.previousName,
+        };
+      });
+    for (const u of this.unresolved) {
+      instruments.push({
+        resolvedFrom: u.typed,
+        name: null,
+        index: null,
+        state: "unresolved",
+        reason: u.reason,
+        rolledAt: null,
+        rollCount: 0,
+        previousName: null,
+      });
+    }
+
     return {
       pipeState: this.pipeStateValue,
       endpoint: this.endpointValue,
       helloReceived: this.helloReceivedValue,
       connectionCount: this.connectionCountValue,
       instrumentCount: this.slots.size,
+      unresolvedCount: this.unresolved.length,
+      helloReannouncements: this.helloReannouncementsValue,
+      instruments,
       framesReceived: this.framesReceivedValue,
       lastFrameStaleness: this.stalenessOf(this.lastFrameAtNs, this.lastFrameOffsetNs),
       stopwatchFrequency:
@@ -485,12 +707,34 @@ function handlerView(h: HandlerLatency): HandlerLatencyView {
   };
 }
 
+export function identityView(id: InstrumentIdentity): IdentityView {
+  return {
+    resolvedFrom: id.resolvedFrom,
+    shape: id.shape,
+    resolvedBy: id.resolvedBy,
+    fullName: id.fullName,
+    masterName: id.masterName,
+    instrumentType: id.instrumentType,
+    exchange: id.exchange,
+    currency: id.currency,
+    tradingHours: id.tradingHours,
+    expiry: expiryTicksToDate(id.expiryTicks),
+    expiryTicks: id.expiryTicks.toString(),
+    tickSize: id.tickSize,
+    pointValue: id.pointValue,
+    rolledAt: dotnetTicksToIso(id.rolledAtUtc),
+    rollCount: id.rollCount,
+  };
+}
+
 function blankSlot(inst: HelloInstrument): InstrumentSlot {
   return {
     index: inst.index,
     name: inst.name,
     tickSize: inst.tickSize,
     pointValue: inst.pointValue,
+    identity: inst.identity,
+    previousIdentity: null,
     snapshot: null,
     receivedAtNs: null,
     offsetNs: null,

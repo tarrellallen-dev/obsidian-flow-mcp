@@ -4,6 +4,7 @@
  * the additive-extension guarantee this file pins.
  */
 
+// Instrument names in the golden files are EXAMPLES; no contract month is hardcoded by the AddOn.
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -188,7 +189,7 @@ describe("cache latency view and latency_report", () => {
     const cache = new StateCache();
     cache.onConnect();
     cache.applyFrame(decodeFrame(golden("hello.bin")));
-    const view = cache.viewLatencyByName("ES 06-26");
+    const view = cache.viewLatencyByName("ES"); // by resolvedFrom; resolved name is the example "ES 12-26"
     expect(view!.instrumentation).toBe("none");
     expect(view!.serialize).toBeNull();
   });

@@ -9,14 +9,17 @@ Apache-2.0.
 
 ## Status
 
-**Build step 2 of 10. Transport and instrumentation.** This repository is structured so that
+**Build step 2.5 of 10. Transport, instrumentation and instrument identity.** This repository is structured so that
 data can leave the NinjaTrader process without blocking its data thread, and so that a Node
 process can decode it. Whether it actually does is a measurement. The AddOn now takes that
 measurement of itself - handler durations into a log-linear histogram, allocation counters
 sampled every 1024 events, its own frame-serialize time - and publishes it in every snapshot,
 in the status window, through the `latency_report` tool and optionally as a CSV dump. The
 harness that drives it under stated load, and therefore any number worth quoting, lands in
-build step 5. Nothing about the market is computed yet.
+build step 5. Step 2.5 resolves every configured instrument into an identity record (resolved
+name, type, exchange, expiry, tick size, point value, trading hours, roll history) that labels
+every frame, and rolls bare futures roots to the new front contract without restarting.
+Nothing about the market is computed yet.
 
 What exists today:
 
@@ -67,6 +70,28 @@ Every cached instrument carries a freshness value:
 
 Instrument indices are valid only for the connection that announced them, so on every reconnect
 the server discards the table and waits for a fresh hello.
+
+## Instrument names
+
+The AddOn config (`Documents\NinjaTrader 8\ObsidianFlow.OrderFlowMcp.json`) lists instruments
+in any of three shapes, and never assumes futures:
+
+- **fully qualified**, with a contract month, e.g. `ES 12-26` (an example month): used exactly
+  as typed and never re-resolved;
+- **bare futures root**, e.g. `ES` (the default): resolved to the front contract using
+  NinjaTrader's own rollover data, re-checked once a minute and at every session boundary, and
+  rolled to the new contract mid-session when it changes. A roll re-announces the instrument
+  table on the same connection and emits a `contractRolled` event carrying both identities, so
+  history from two contracts is never blended;
+- **anything else** - equities, forex, crypto, indexes, CFDs - e.g. `MSFT`, `EURUSD`: resolved
+  directly and never re-resolved.
+
+Every resolved instrument carries an identity record (what was typed, resolved name, master
+instrument, type, exchange, currency, trading-hours template, expiry, tick size, point value,
+roll time and count). The `instruments` tool returns it; the `health` tool reports each config
+entry as resolved, unresolved with the AddOn's reason, or rolled at a time. No contract month
+is hardcoded anywhere in this repository outside test fixtures and documentation examples.
+Details: `addon/README.md`, "Instrument names".
 
 ## Running it
 

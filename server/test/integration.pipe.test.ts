@@ -15,6 +15,8 @@ import { PipeClient } from "../src/transport/pipeClient.js";
 import { attach, buildServer } from "../src/index.js";
 import { HEADER_BYTES } from "../src/wire/decoder.js";
 
+// Instrument names in these fixtures are EXAMPLES; the base-table hello built here is the
+// step-2 layout, which the decoder still accepts (identities absent).
 const TYPE_SNAPSHOT = 1;
 const TYPE_HELLO = 3;
 const TYPE_HEARTBEAT = 4;

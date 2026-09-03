@@ -54,9 +54,12 @@ A line ending in `obsidian-flow-mcp-v1` means the AddOn is listening. Nothing pr
 AddOn is not running, or is running under a different pipe name - check `pipeName` in
 `Documents\NinjaTrader 8\ObsidianFlow.OrderFlowMcp.json` and the status window.
 
-The `instruments` list in that file must name instruments the connected feed actually provides,
-including the correct contract month. An expired contract produces a connected pipe with no
-market data, which the status window shows as zero events drained.
+The `instruments` list in that file must name instruments the connected feed actually provides.
+A bare futures root such as `ES` (the default) is resolved to the front contract and rolled
+automatically; a fully qualified name with a contract month is used exactly as typed, so an
+expired contract typed that way produces a connected pipe with no market data, which the status
+window's "Resolved as" row marks as EXPIRED and the events-drained row shows as zero. See
+`addon/README.md`, "Instrument names", for the three accepted shapes.
 
 ## 4. Point an MCP client at it
 

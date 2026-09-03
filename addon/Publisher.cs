@@ -6,6 +6,11 @@
 // duration samples into per-instrument LatencyHistograms, times its own frame serialization,
 // recomputes percentiles once a second, appends them to the snapshot payload, and optionally
 // dumps them as CSV every 10 s. All of that runs here, never on a data thread.
+// Step 2.5 adds roll detection: once a minute and at every session boundary, each feed whose
+// config entry was a bare root is re-resolved on this thread; when the front contract changed,
+// a new feed (new rings, new counters) is built and swapped in at the same index, the old one
+// is unsubscribed, the hello is re-announced with the new identity and a contractRolled event
+// carries both identities. Fully qualified and non-futures entries are never re-resolved.
 // .NET Framework 4.8. ASCII only.
 
 using System;
@@ -31,6 +36,15 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         public const int MaxFrameBytes = 1048576;   // 1 MiB
         public const int HeaderBytes = 32;          // bytes after the u32 length field
 
+        // Event kinds carried by frame type 2 (schema/wire-v1.md "type 2 - event").
+        public const ushort EventContractRolled = 1;
+
+        // Roll re-check cadence for root entries (step 2.5): at most once a minute, plus the
+        // session boundary trigger. The clock is probed once a second to keep DateTime.Now
+        // off the per-pass drain path.
+        private const int RollCheckIntervalMs = 60000;
+        private const int RollProbeIntervalMs = 1000;
+
         private const int HeartbeatMs = 1000;
 
         // Percentiles are recomputed at most this often (spec: once per second).
@@ -45,7 +59,20 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         private const int AcceptPollMs = 10;
 
         private readonly Config _config;
-        private readonly List<InstrumentFeed> _feeds;
+
+        // The live feeds, indexed by instrument index. Written only by the publisher thread
+        // (a roll swaps one element); read by the status window through FeedsSnapshot with
+        // volatile reads. Never resized: the hello table's indices are fixed for the process.
+        private readonly InstrumentFeed[] _feeds;
+        private readonly UnresolvedInstrument[] _unresolved;
+
+        // Rolls detected since the last hello went out on the current connection. Publisher
+        // thread only. Cleared when a hello carries the new identities.
+        private readonly List<RollRecord> _pendingRolls = new List<RollRecord>();
+        private long _nextRollProbeTicks;
+        private long _nextRollCheckTicks;
+        private long _rollsTotal;
+        private string _lastRoll;
 
         private readonly byte[] _frameBuffer;       // preallocated; reused for every frame
         private readonly Thread _thread;
@@ -103,13 +130,14 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
 
         private int _disposed;
 
-        public Publisher(Config config, List<InstrumentFeed> feeds)
+        public Publisher(Config config, List<InstrumentFeed> feeds, List<UnresolvedInstrument> unresolved)
         {
             _config = config;
-            _feeds = feeds;
+            _feeds = feeds.ToArray();
+            _unresolved = unresolved != null ? unresolved.ToArray() : new UnresolvedInstrument[0];
             _frameBuffer = new byte[MaxFrameBytes];
 
-            int n = feeds.Count;
+            int n = _feeds.Length;
             _dataHist = new LatencyHistogram[n];
             _depthHist = new LatencyHistogram[n];
             _dataSummary = new LatencySummary[n];
@@ -145,9 +173,25 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         public string LastError { get { return Volatile.Read(ref _lastError); } }
         public string PipeName { get { return _config.PipeName; } }
 
+        // ----- roll status (status window, UI thread) -----
+        public long RollsTotal { get { return Interlocked.Read(ref _rollsTotal); } }
+        public string LastRoll { get { return Volatile.Read(ref _lastRoll); } }
+        public UnresolvedInstrument[] Unresolved { get { return _unresolved; } }
+
+        // Copy of the live feed array. Elements are read with Volatile.Read so a swap made by
+        // the publisher thread is seen whole (the reference is the unit of publication and the
+        // feed's identity is immutable).
+        public InstrumentFeed[] FeedsSnapshot()
+        {
+            InstrumentFeed[] copy = new InstrumentFeed[_feeds.Length];
+            for (int i = 0; i < _feeds.Length; i++)
+                copy[i] = Volatile.Read(ref _feeds[i]);
+            return copy;
+        }
+
         // ----- instrumentation accessors (status window, UI thread; plain volatile reads) -----
-        public int FeedCount { get { return _feeds.Count; } }
-        public string FeedName(int i) { return _feeds[i].InstrumentName; }
+        public int FeedCount { get { return _feeds.Length; } }
+        public string FeedName(int i) { return Volatile.Read(ref _feeds[i]).InstrumentName; }
         public LatencySummary DataSummary(int i) { return _dataSummary[i]; }
         public LatencySummary DepthSummary(int i) { return _depthSummary[i]; }
         public LatencySummary SerializeSummary { get { return _serializeSummary; } }
@@ -229,6 +273,8 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             _publisherAllocBaseline = AllocationProbe.Read();
             _nextSummaryTicks = Stopwatch.GetTimestamp() + (Stopwatch.Frequency * SummaryIntervalMs) / 1000L;
             _nextDumpTicks = Stopwatch.GetTimestamp() + (Stopwatch.Frequency * DumpIntervalMs) / 1000L;
+            _nextRollProbeTicks = Stopwatch.GetTimestamp() + (Stopwatch.Frequency * RollProbeIntervalMs) / 1000L;
+            _nextRollCheckTicks = Stopwatch.GetTimestamp() + (Stopwatch.Frequency * RollCheckIntervalMs) / 1000L;
             OpenDump();
 
             while (!_stopRequested)
@@ -408,7 +454,10 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
 
         private void ServeConnection(NamedPipeServerStream server)
         {
+            // The hello already carries rolledAt and rollCount for every feed, so rolls that
+            // happened while nobody was attached need no separate event on this connection.
             WriteHello(server);
+            _pendingRolls.Clear();
 
             long freq = Stopwatch.Frequency;
             long snapshotIntervalTicks = freq / Math.Max(1, _config.PushRateHz);
@@ -426,11 +475,22 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             {
                 int drained = DrainAll();
 
+                // A roll swapped a feed during that drain. Re-announce the table (same indices,
+                // new identity at the rolled index) and mark the boundary with a discrete event
+                // before any snapshot of the new contract goes out under that index.
+                if (_pendingRolls.Count > 0)
+                {
+                    WriteHello(server);
+                    for (int r = 0; r < _pendingRolls.Count; r++)
+                        WriteContractRolled(server, _pendingRolls[r]);
+                    _pendingRolls.Clear();
+                }
+
                 now = Stopwatch.GetTimestamp();
 
                 if (now >= nextSnapshot)
                 {
-                    for (int i = 0; i < _feeds.Count; i++)
+                    for (int i = 0; i < _feeds.Length; i++)
                         WriteSnapshot(server, _feeds[i]);
 
                     // Fixed cadence, not now + interval, so the schedule does not drift by the
@@ -478,7 +538,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             long dropped = 0;
             long samples = 0;
 
-            for (int i = 0; i < _feeds.Count; i++)
+            for (int i = 0; i < _feeds.Length; i++)
             {
                 InstrumentFeed f = _feeds[i];
                 total += f.DataRing.Drain(null);
@@ -518,8 +578,115 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                 WriteDump();
                 _nextDumpTicks = now + (Stopwatch.Frequency * DumpIntervalMs) / 1000L;
             }
+            if (now >= _nextRollProbeTicks)
+            {
+                CheckRolls(now);
+                _nextRollProbeTicks = now + (Stopwatch.Frequency * RollProbeIntervalMs) / 1000L;
+            }
 
             return total;
+        }
+
+        // ------------------------------------------------------------------
+        // Roll detection (step 2.5). Publisher thread only.
+        // ------------------------------------------------------------------
+        private sealed class RollRecord
+        {
+            public int Index;
+            public InstrumentIdentity Previous;
+            public InstrumentIdentity Next;
+        }
+
+        // Once a second: decide whether the minute deadline or any feed's session boundary has
+        // passed, and only then touch the wall clock and the resolver. Root entries only.
+        private void CheckRolls(long swNow)
+        {
+            bool minuteDue = swNow >= _nextRollCheckTicks;
+            if (minuteDue)
+                _nextRollCheckTicks = swNow + (Stopwatch.Frequency * RollCheckIntervalMs) / 1000L;
+
+            DateTime now = DateTime.Now;
+
+            for (int i = 0; i < _feeds.Length; i++)
+            {
+                InstrumentFeed feed = _feeds[i];
+                if (feed == null || feed.Identity == null)
+                    continue;
+
+                bool sessionDue = feed.SessionBoundaryTicks != 0 && now.Ticks >= feed.SessionBoundaryTicks;
+                if (sessionDue)
+                    feed.SessionBoundaryTicks = InstrumentResolver.NextSessionEndTicks(feed.Identity.Instrument, now);
+
+                if (feed.Identity.Shape != InstrumentShape.Root)
+                    continue;
+                if (!minuteDue && !sessionDue)
+                    continue;
+
+                try
+                {
+                    ReResolve(i, feed, now);
+                }
+                catch (Exception ex)
+                {
+                    // A resolver or subscription failure leaves the current feed in place and
+                    // is reported; it never ends this thread.
+                    Volatile.Write(ref _lastError, "roll check " + feed.ResolvedFrom + ": " + ex.Message);
+                }
+            }
+        }
+
+        private void ReResolve(int index, InstrumentFeed current, DateTime now)
+        {
+            InstrumentIdentity previous = current.Identity;
+            string error;
+            InstrumentIdentity candidate = InstrumentResolver.Resolve(
+                previous.ResolvedFrom, now, previous.RolledAtUtcTicks, previous.RollCount, out error);
+
+            if (candidate == null)
+            {
+                // Keep the contract we have; the reason is visible in the status window.
+                Volatile.Write(ref _lastError, "roll check " + previous.ResolvedFrom + ": " + error);
+                return;
+            }
+            if (candidate.SameContract(previous))
+                return;
+
+            InstrumentIdentity next = candidate.AsRolledFrom(previous, DateTime.UtcNow);
+
+            // New feed, new rings, new counters: nothing accumulated under the old contract is
+            // carried across, and the old MarketData/MarketDepth objects keep their own rings
+            // until they are unhooked, so no ring ever has two producers.
+            InstrumentFeed replacement = new InstrumentFeed(next, index, _config.RingCapacity);
+            if (!replacement.Subscribe(out error))
+            {
+                replacement.Dispose();
+                Volatile.Write(ref _lastError, "roll " + previous.FullName + " -> " + next.FullName + " subscribe failed: " + error);
+                return;
+            }
+
+            Volatile.Write(ref _feeds[index], replacement);
+
+            // Contract-specific per-index state: sample drain positions restart with the new
+            // feed's counters, and ring drops and overruns belong to the old rings. The latency
+            // histograms measure the handler code, not the contract, and are kept.
+            _dataDrained[index] = 0;
+            _depthDrained[index] = 0;
+            _dataDrops[index] = 0;
+            _depthDrops[index] = 0;
+            _dataOverruns[index] = 0;
+            _depthOverruns[index] = 0;
+
+            try { current.Dispose(); } catch (Exception) { }
+
+            RollRecord record = new RollRecord();
+            record.Index = index;
+            record.Previous = previous;
+            record.Next = next;
+            _pendingRolls.Add(record);
+
+            Interlocked.Increment(ref _rollsTotal);
+            Volatile.Write(ref _lastRoll, previous.ResolvedFrom + ": " + previous.FullName + " -> " + next.FullName
+                + " at " + new DateTime(next.RolledAtUtcTicks, DateTimeKind.Utc).ToString("yyyy-MM-dd HH:mm:ss'Z'", CultureInfo.InvariantCulture));
         }
 
         // Records every sample in [drained, produced) into h and advances drained. The handler's
@@ -572,7 +739,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             Interlocked.Exchange(ref _allocDelta, delta);
             Interlocked.Exchange(ref _publisherAllocTotal, AllocationProbe.Report(delta));
 
-            for (int i = 0; i < _feeds.Count; i++)
+            for (int i = 0; i < _feeds.Length; i++)
             {
                 InstrumentFeed f = _feeds[i];
                 _dataSummary[i].Update(
@@ -646,7 +813,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                 string stamp = DateTime.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
                 _dumpText.Length = 0;
 
-                for (int i = 0; i < _feeds.Count; i++)
+                for (int i = 0; i < _feeds.Length; i++)
                 {
                     string name = _feeds[i].InstrumentName;
                     AppendDumpRow(stamp, name, "data", _dataSummary[i]);
@@ -738,8 +905,9 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             // measured from receive time forward, with no way to say so honestly.
             p = PutU64(_frameBuffer, p, (ulong)Stopwatch.Frequency);
 
-            p = PutU16(_frameBuffer, p, (ushort)_feeds.Count);
-            for (int i = 0; i < _feeds.Count; i++)
+            // ----- base table (steps 1 and 2; layout unchanged) -----
+            p = PutU16(_frameBuffer, p, (ushort)_feeds.Length);
+            for (int i = 0; i < _feeds.Length; i++)
             {
                 InstrumentFeed f = _feeds[i];
                 p = PutU16(_frameBuffer, p, (ushort)f.Index);
@@ -748,7 +916,58 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                 p = PutF64(_frameBuffer, p, f.PointValue);
             }
 
+            // ----- identity section (step 2.5, additive; schema/wire-v1.md "hello") -----
+            p = PutU16(_frameBuffer, p, (ushort)_feeds.Length);
+            for (int i = 0; i < _feeds.Length; i++)
+            {
+                InstrumentFeed f = _feeds[i];
+                p = PutU16(_frameBuffer, p, (ushort)f.Index);
+                p = PutIdentity(_frameBuffer, p, f.Identity);
+            }
+
+            p = PutU16(_frameBuffer, p, (ushort)_unresolved.Length);
+            for (int i = 0; i < _unresolved.Length; i++)
+            {
+                p = PutAsciiWithU8Length(_frameBuffer, p, _unresolved[i].Typed);
+                p = PutAsciiWithU8Length(_frameBuffer, p, _unresolved[i].Reason);
+            }
+
             EmitFrame(server, FrameTypeHello, InstrumentNone, p);
+        }
+
+        // Identity block, schema/wire-v1.md "identity block". Same layout in the hello and in
+        // the contractRolled event. Strings are ASCII with a u8 length; missing strings are
+        // written with length 0.
+        private static int PutIdentity(byte[] b, int p, InstrumentIdentity id)
+        {
+            b[p++] = id != null ? (byte)id.Shape : (byte)0;
+            b[p++] = id != null ? (byte)id.ResolvedBy : (byte)0;
+            p = PutAsciiWithU8Length(b, p, id != null ? id.ResolvedFrom : null);
+            p = PutAsciiWithU8Length(b, p, id != null ? id.FullName : null);
+            p = PutAsciiWithU8Length(b, p, id != null ? id.MasterName : null);
+            p = PutAsciiWithU8Length(b, p, id != null ? id.InstrumentType : null);
+            p = PutAsciiWithU8Length(b, p, id != null ? id.Exchange : null);
+            p = PutAsciiWithU8Length(b, p, id != null ? id.Currency : null);
+            p = PutAsciiWithU8Length(b, p, id != null ? id.TradingHours : null);
+            p = PutI64(b, p, id != null ? id.ExpiryTicks : 0L);
+            p = PutF64(b, p, id != null ? id.TickSize : 0.0);
+            p = PutF64(b, p, id != null ? id.PointValue : 0.0);
+            p = PutI64(b, p, id != null ? id.RolledAtUtcTicks : 0L);
+            p = PutU16(b, p, id != null ? id.RollCount : (ushort)0);
+            return p;
+        }
+
+        // Frame type 2, eventKind 1: the roll boundary for one instrument index. Sent right
+        // after the re-announced hello, before any snapshot of the new contract.
+        private void WriteContractRolled(NamedPipeServerStream server, RollRecord record)
+        {
+            int p = 4 + HeaderBytes;
+            p = PutU16(_frameBuffer, p, EventContractRolled);
+            p = PutU16(_frameBuffer, p, 0);                                  // reserved
+            p = PutI64(_frameBuffer, p, record.Next.RolledAtUtcTicks);
+            p = PutIdentity(_frameBuffer, p, record.Previous);
+            p = PutIdentity(_frameBuffer, p, record.Next);
+            EmitFrame(server, FrameTypeEvent, (ushort)record.Index, p);
         }
 
         private void WriteHeartbeat(NamedPipeServerStream server)

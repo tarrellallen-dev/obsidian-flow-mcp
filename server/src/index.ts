@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * Obsidian Flow MCP server - build step 2.
+ * Obsidian Flow MCP server - build step 2.5.
  *
- * Transport, threading contract and instrumentation. Three tools, all answering from the
- * in-process cache: `health`, `instruments` and `latency_report`. No market state is computed
- * anywhere in this build step.
+ * Transport, threading contract, instrumentation, and instrument identity. Three tools, all
+ * answering from the in-process cache: `health`, `instruments` and `latency_report`. No market
+ * state is computed anywhere in this build step.
  */
 
 import os from "node:os";
@@ -18,7 +18,7 @@ import { loadServerConfig, type ServerConfig } from "./config.js";
 import { PipeClient, resolveEndpoint, type PipeClientOptions } from "./transport/pipeClient.js";
 
 export const SERVER_NAME = "obsidian-flow-mcp";
-export const SERVER_VERSION = "0.2.0";
+export const SERVER_VERSION = "0.2.5";
 
 /** Spec section 8: every published number carries its environment. Built once per call. */
 export interface EnvironmentBlock {
@@ -88,8 +88,15 @@ export function buildServer(cache: StateCache, config: ServerConfig = loadServer
         "connection has sent its hello, ring-dropped event count (market events the AddOn's " +
         "rings dropped, not dropped snapshots - snapshots conflate), and events drained by the AddOn " +
         "publisher. Answers from an in-process cache, so this is the state as of the last frame " +
-        "received, not a live query. Build steps 1 and 2 expose transport counters and the " +
+        "received, not a live query. Build steps 1, 2 and 2.5 expose transport counters and the " +
         "AddOn's own instrumentation (see latency_report); no market state is computed. " +
+        "The `instruments` array gives one resolution state per AddOn config entry: `resolved` " +
+        "(subscribed), `unresolved` with the AddOn's reason (the entry produced no subscription " +
+        "and has no index), `rolled` with `rolledAt` and `previousName` (the entry was a bare " +
+        "futures root and the AddOn moved it to a new front contract, either on this connection " +
+        "or earlier in the AddOn process), or `identity-absent` (a pre-2.5 AddOn). A bare root " +
+        "such as \"ES\" auto-resolves to the front contract and can roll mid-session; a roll " +
+        "re-announces the hello and appears as a contractRolled entry in recentEvents. " +
         "Staleness is two separate numbers and they must not be silently added together. " +
         "receiveToServeMs is measured exactly, on this process's own monotonic clock, from " +
         "decoding the frame to answering this call. oneWayEstimateMs is an ESTIMATE of the " +
@@ -109,14 +116,32 @@ export function buildServer(cache: StateCache, config: ServerConfig = loadServer
     {
       title: "Instruments",
       description:
-        "Instruments announced by the AddOn in the current connection's hello frame, with tick " +
-        "size and point value. Each entry carries freshness (live | stale | reconnecting) and a " +
-        "staleness block whose two numbers are described by the health tool: receiveToServeMs is " +
-        "measured, oneWayEstimateMs is an estimate. `reconnecting` means the link dropped and no " +
-        "hello has arrived yet: the " +
-        "instrument list from the previous connection is not valid and its indices are not " +
-        "reused. Answers from cache; never blocks.",
-      inputSchema: { name: z.string().optional().describe("Filter to one instrument by name.") },
+        "Instruments announced by the AddOn in the current connection's hello frame, with the " +
+        "identity record the AddOn resolved for each: `name` is the resolved NinjaTrader name " +
+        "(Instrument.FullName), `resolvedFrom` is exactly what the user typed in the AddOn " +
+        "config, and `identity` carries shape, resolvedBy, masterName, instrumentType (Future, " +
+        "Stock, Forex, CryptoCurrency, Index, ...), exchange, currency, tradingHours, expiry " +
+        "(YYYY-MM-DD, null when the instrument does not expire), tickSize, pointValue, rolledAt " +
+        "and rollCount. This record is the fingerprint used to label recorded history: two " +
+        "entries with the same resolvedFrom but different name are different contracts. Config " +
+        "entries take three shapes: a fully qualified name with a contract month is used " +
+        "as-is and never re-resolved; a bare futures root (e.g. \"ES\") auto-resolves to the " +
+        "front contract by NinjaTrader's own rollover data and CAN ROLL MID-SESSION (checked " +
+        "once a minute and at session boundaries; a roll re-announces this table with the same " +
+        "index and a new identity, and `resolution.state` becomes `rolled`); any non-futures " +
+        "symbol resolves directly. Config entries that did not resolve have no index here; the " +
+        "health tool lists them with the reason. Each entry carries freshness (live | stale | " +
+        "reconnecting) and a staleness block whose two numbers are described by the health " +
+        "tool: receiveToServeMs is measured, oneWayEstimateMs is an estimate. `reconnecting` " +
+        "means the link dropped and no hello has arrived yet: the instrument list from the " +
+        "previous connection is not valid and its indices are not reused. Answers from cache; " +
+        "never blocks.",
+      inputSchema: {
+        name: z
+          .string()
+          .optional()
+          .describe("Filter to one instrument by resolved name or by the config entry as typed (e.g. a bare root)."),
+      },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
     async ({ name }) => {
@@ -125,11 +150,13 @@ export function buildServer(cache: StateCache, config: ServerConfig = loadServer
         return json({
           helloReceived: cache.helloReceived,
           instruments: view ? [view] : [],
+          unresolved: cache.unresolvedInstruments.filter((u) => u.typed === name),
         });
       }
       return json({
         helloReceived: cache.helloReceived,
         instruments: cache.viewInstruments(),
+        unresolved: cache.unresolvedInstruments,
       });
     },
   );
@@ -164,7 +191,12 @@ export function buildServer(cache: StateCache, config: ServerConfig = loadServer
         "histograms undercount). The environment block names the NT8 build and feed from " +
         "server/orderflow.config.json, this process's Node, OS and CPU, and the publisher's " +
         "Stopwatch frequency. Answers from cache; never blocks.",
-      inputSchema: { name: z.string().optional().describe("Filter to one instrument by name.") },
+      inputSchema: {
+        name: z
+          .string()
+          .optional()
+          .describe("Filter to one instrument by resolved name or by the config entry as typed."),
+      },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
     async ({ name }) => {

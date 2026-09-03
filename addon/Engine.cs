@@ -1,5 +1,8 @@
 // Obsidian Flow MCP - AddOn
 // Owns config, the per-instrument feeds and the publisher thread. Start/Stop is idempotent.
+// Step 2.5: instruments are resolved through InstrumentResolver (any asset class, three
+// accepted config shapes); entries that do not resolve are kept as a list with a reason and
+// shown in the status window and the hello frame, never thrown.
 // .NET Framework 4.8. ASCII only.
 
 using System;
@@ -15,6 +18,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
 
         private readonly object _gate = new object();
         private readonly List<InstrumentFeed> _feeds = new List<InstrumentFeed>();
+        private readonly List<UnresolvedInstrument> _unresolved = new List<UnresolvedInstrument>();
         private readonly List<string> _startupMessages = new List<string>();
 
         private Config _config;
@@ -49,6 +53,12 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             get { lock (_gate) { return _startupMessages.ToArray(); } }
         }
 
+        // Config entries that produced no subscription, with the reason. Fixed at start.
+        public UnresolvedInstrument[] Unresolved
+        {
+            get { lock (_gate) { return _unresolved.ToArray(); } }
+        }
+
         public void Start()
         {
             lock (_gate)
@@ -57,6 +67,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                     return;
 
                 _startupMessages.Clear();
+                _unresolved.Clear();
 
                 string loadError;
                 string path = Config.DefaultPath();
@@ -73,30 +84,53 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                 RuntimeHelpers.RunClassConstructor(typeof(AllocationProbe).TypeHandle);
                 RuntimeHelpers.RunClassConstructor(typeof(LatencyHistogram).TypeHandle);
 
+                DateTime now = DateTime.Now;
                 int index = 0;
                 for (int i = 0; i < _config.Instruments.Count; i++)
                 {
-                    string name = _config.Instruments[i];
-                    if (string.IsNullOrEmpty(name))
+                    string typed = _config.Instruments[i];
+                    if (string.IsNullOrEmpty(typed))
                         continue;
 
-                    InstrumentFeed feed = new InstrumentFeed(name, index, _config.RingCapacity);
                     string error;
+                    InstrumentIdentity identity = InstrumentResolver.Resolve(typed, now, out error);
+                    if (identity == null)
+                    {
+                        _unresolved.Add(new UnresolvedInstrument(typed, error));
+                        _startupMessages.Add("unresolved: " + typed + ": " + error);
+                        continue;
+                    }
+
+                    InstrumentFeed feed = new InstrumentFeed(identity, index, _config.RingCapacity);
                     if (feed.Subscribe(out error))
                     {
                         _feeds.Add(feed);
                         index++;
+                        _startupMessages.Add("resolved: " + typed + " -> " + identity.FullName
+                            + " (" + identity.InstrumentType + ", " + DescribeShape(identity.Shape) + ")");
                     }
                     else
                     {
-                        _startupMessages.Add("subscribe failed: " + name + ": " + error);
+                        _unresolved.Add(new UnresolvedInstrument(typed, "subscribe failed: " + error));
+                        _startupMessages.Add("subscribe failed: " + typed + ": " + error);
                         feed.Dispose();
                     }
                 }
 
-                _publisher = new Publisher(_config, _feeds);
+                _publisher = new Publisher(_config, _feeds, _unresolved);
                 _publisher.Start();
                 _running = true;
+            }
+        }
+
+        public static string DescribeShape(InstrumentShape shape)
+        {
+            switch (shape)
+            {
+                case InstrumentShape.FullyQualified: return "fully qualified, never re-resolved";
+                case InstrumentShape.Root: return "root, front contract, re-checked for rolls";
+                case InstrumentShape.Direct: return "direct, never re-resolved";
+                default: return "unknown shape";
             }
         }
 
@@ -109,12 +143,25 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
 
                 _running = false;
 
+                // The publisher may have swapped feeds in for rolled contracts, so the live set
+                // is its array, not the list handed to it at start. Stop the publisher first
+                // (it joins its thread), then take its final array and dispose every feed.
+                InstrumentFeed[] live = null;
                 if (_publisher != null)
                 {
+                    try { live = _publisher.FeedsSnapshot(); } catch (Exception) { }
                     try { _publisher.Dispose(); } catch (Exception) { }
+                    try { live = _publisher.FeedsSnapshot(); } catch (Exception) { }
                     _publisher = null;
                 }
 
+                if (live == null)
+                    live = _feeds.ToArray();
+
+                for (int i = 0; i < live.Length; i++)
+                {
+                    try { if (live[i] != null) live[i].Dispose(); } catch (Exception) { }
+                }
                 for (int i = 0; i < _feeds.Count; i++)
                 {
                     try { _feeds[i].Dispose(); } catch (Exception) { }
@@ -123,9 +170,19 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             }
         }
 
+        // The live feeds. After a roll the publisher's array holds the new feed at the same
+        // index; the start-up list is only the initial set.
         public InstrumentFeed[] Feeds
         {
-            get { lock (_gate) { return _feeds.ToArray(); } }
+            get
+            {
+                lock (_gate)
+                {
+                    if (_publisher != null)
+                        return _publisher.FeedsSnapshot();
+                    return _feeds.ToArray();
+                }
+            }
         }
 
         public void Dispose()

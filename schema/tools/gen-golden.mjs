@@ -19,8 +19,14 @@ const VERSION = 1;
 const INSTRUMENT_NONE = 0xffff;
 
 const TYPE_SNAPSHOT = 1;
+const TYPE_EVENT = 2;
 const TYPE_HELLO = 3;
 const TYPE_HEARTBEAT = 4;
+
+const EVENT_CONTRACT_ROLLED = 1;
+
+// Every instrument name in this file is an EXAMPLE fixture. The AddOn hardcodes no contract
+// month; see addon/README.md "Instrument names".
 
 function frame({ type, sequence, ringEventsDropped, sentTicks, wallUtc, instrument, payload }) {
   const buf = Buffer.alloc(4 + HEADER_BYTES + payload.length);
@@ -41,6 +47,19 @@ function frame({ type, sequence, ringEventsDropped, sentTicks, wallUtc, instrume
 // assume it - which is exactly why it is on the wire.
 const STOPWATCH_FREQUENCY = 10_000_000n;
 
+function str8(s) {
+  const b = Buffer.from(s ?? "", "ascii");
+  if (b.length > 255) throw new Error("string too long for u8 length");
+  return Buffer.concat([Buffer.from([b.length]), b]);
+}
+
+function u16(v) {
+  const b = Buffer.alloc(2);
+  b.writeUInt16LE(v, 0);
+  return b;
+}
+
+// Base table only (steps 1 and 2). Byte-identical to what a step-2 publisher sends.
 function helloPayload(instruments, stopwatchFrequency = STOPWATCH_FREQUENCY) {
   const parts = [];
   const head = Buffer.alloc(10);
@@ -60,6 +79,59 @@ function helloPayload(instruments, stopwatchFrequency = STOPWATCH_FREQUENCY) {
     parts.push(entry);
   }
   return Buffer.concat(parts);
+}
+
+// .NET ticks (100 ns since 0001-01-01) of a calendar date at 00:00, no time zone.
+const DOTNET_TICKS_AT_UNIX_EPOCH = 621_355_968_000_000_000n;
+function dateTicks(year, month, day) {
+  return BigInt(Date.UTC(year, month - 1, day)) * 10_000n + DOTNET_TICKS_AT_UNIX_EPOCH;
+}
+
+const SHAPE = { fullyQualified: 1, root: 2, direct: 3 };
+const RESOLVED_BY = { asTyped: 1, nt8Default: 2, rolloverTable: 3, nextExpiry: 4 };
+
+// Identity block, schema/wire-v1.md "identity block". Same bytes in the hello and the event.
+function identityBlock(id) {
+  const fixed = Buffer.alloc(8 + 8 + 8 + 8 + 2);
+  fixed.writeBigInt64LE(id.expiryTicks, 0);
+  fixed.writeDoubleLE(id.tickSize, 8);
+  fixed.writeDoubleLE(id.pointValue, 16);
+  fixed.writeBigInt64LE(id.rolledAtUtc ?? 0n, 24);
+  fixed.writeUInt16LE(id.rollCount ?? 0, 32);
+  return Buffer.concat([
+    Buffer.from([SHAPE[id.shape], RESOLVED_BY[id.resolvedBy]]),
+    str8(id.resolvedFrom),
+    str8(id.name),
+    str8(id.masterName),
+    str8(id.instrumentType),
+    str8(id.exchange),
+    str8(id.currency),
+    str8(id.tradingHours),
+    fixed,
+  ]);
+}
+
+// Step-2.5 hello: base table, then the identity section (identities in table order, then the
+// unresolved config entries).
+function helloPayloadWithIdentity(instruments, unresolved, stopwatchFrequency = STOPWATCH_FREQUENCY) {
+  const parts = [helloPayload(instruments, stopwatchFrequency)];
+  parts.push(u16(instruments.length));
+  for (const inst of instruments) {
+    parts.push(u16(inst.index), identityBlock(inst));
+  }
+  parts.push(u16(unresolved.length));
+  for (const u of unresolved) {
+    parts.push(str8(u.typed), str8(u.reason));
+  }
+  return Buffer.concat(parts);
+}
+
+function contractRolledPayload(previous, next) {
+  const head = Buffer.alloc(12);
+  head.writeUInt16LE(EVENT_CONTRACT_ROLLED, 0);
+  head.writeUInt16LE(0, 2);
+  head.writeBigInt64LE(next.rolledAtUtc, 4);
+  return Buffer.concat([head, identityBlock(previous), identityBlock(next)]);
 }
 
 // Step-1 snapshot payload: 24 bytes. Still a valid snapshot in step 2 (the decoder accepts
@@ -104,7 +176,9 @@ function snapshotPayloadStep2(step1, s2) {
 const SENT = 1234567890123n;
 const WALL = 638000000000000000n;
 
-const hello = frame({
+// Step-2 hello, base table only. Kept byte-identical (it was hello.bin through step 2) so the
+// decoder keeps accepting a publisher that predates the identity section. Example names.
+const helloBase = frame({
   type: TYPE_HELLO,
   sequence: 0,
   ringEventsDropped: 0,
@@ -115,6 +189,101 @@ const hello = frame({
     { index: 0, name: "ES 06-26", tickSize: 0.25, pointValue: 50 },
     { index: 1, name: "NQ 06-26", tickSize: 0.25, pointValue: 20 },
   ]),
+});
+
+// Step-2.5 hello. Three config shapes, one unresolved entry. All names are examples.
+const esFront = {
+  index: 0,
+  name: "ES 12-26",
+  tickSize: 0.25,
+  pointValue: 50,
+  shape: "root",
+  resolvedBy: "nt8Default",
+  resolvedFrom: "ES",
+  masterName: "ES",
+  instrumentType: "Future",
+  exchange: "Globex",
+  currency: "UsDollar",
+  tradingHours: "CME US Index Futures ETH",
+  expiryTicks: dateTicks(2026, 12, 18),
+  rolledAtUtc: 0n,
+  rollCount: 0,
+};
+const nqQualified = {
+  index: 1,
+  name: "NQ 03-27",
+  tickSize: 0.25,
+  pointValue: 20,
+  shape: "fullyQualified",
+  resolvedBy: "asTyped",
+  resolvedFrom: "NQ 03-27",
+  masterName: "NQ",
+  instrumentType: "Future",
+  exchange: "Globex",
+  currency: "UsDollar",
+  tradingHours: "CME US Index Futures ETH",
+  expiryTicks: dateTicks(2027, 3, 19),
+  rolledAtUtc: 0n,
+  rollCount: 0,
+};
+const eurusd = {
+  index: 2,
+  name: "EURUSD",
+  tickSize: 0.00001,
+  pointValue: 100000,
+  shape: "direct",
+  resolvedBy: "asTyped",
+  resolvedFrom: "EURUSD",
+  masterName: "EURUSD",
+  instrumentType: "Forex",
+  exchange: "Default",
+  currency: "UsDollar",
+  tradingHours: "Forex",
+  expiryTicks: 0n,
+  rolledAtUtc: 0n,
+  rollCount: 0,
+};
+const unresolved = [{ typed: "XYZ", reason: "not in the NinjaTrader instrument database: XYZ" }];
+
+const hello = frame({
+  type: TYPE_HELLO,
+  sequence: 0,
+  ringEventsDropped: 0,
+  sentTicks: SENT,
+  wallUtc: WALL,
+  instrument: INSTRUMENT_NONE,
+  payload: helloPayloadWithIdentity([esFront, nqQualified, eurusd], unresolved),
+});
+
+// The same table after index 0 rolled: nothing moves, the identity at 0 is replaced.
+const ROLLED_AT = WALL + 60_000_000_000n; // 100 minutes after WALL, in .NET ticks
+const esNext = {
+  ...esFront,
+  name: "ES 03-27",
+  resolvedBy: "rolloverTable",
+  expiryTicks: dateTicks(2027, 3, 19),
+  rolledAtUtc: ROLLED_AT,
+  rollCount: 1,
+};
+
+const helloRolled = frame({
+  type: TYPE_HELLO,
+  sequence: 6,
+  ringEventsDropped: 0,
+  sentTicks: SENT + 60_000_000n,
+  wallUtc: ROLLED_AT,
+  instrument: INSTRUMENT_NONE,
+  payload: helloPayloadWithIdentity([esNext, nqQualified, eurusd], unresolved),
+});
+
+const eventContractRolled = frame({
+  type: TYPE_EVENT,
+  sequence: 7,
+  ringEventsDropped: 0,
+  sentTicks: SENT + 60_000_001n,
+  wallUtc: ROLLED_AT,
+  instrument: 0,
+  payload: contractRolledPayload(esFront, esNext),
 });
 
 const helloEmpty = frame({
@@ -211,13 +380,41 @@ const snapshotStep2Unavailable = frame({
 });
 
 mkdirSync(OUT, { recursive: true });
+// A roll mid-connection: snapshot of the old contract, re-announced hello, the boundary event,
+// snapshot of the new contract, all for index 0.
+const snapshotBeforeRoll = frame({
+  type: TYPE_SNAPSHOT,
+  sequence: 5,
+  ringEventsDropped: 0,
+  sentTicks: SENT + 50_000_000n,
+  wallUtc: WALL + 50_000_000n,
+  instrument: 0,
+  payload: snapshotPayload({ eventsDrained: 500n, bytesAllocatedOnPublisher: 0n, handlerSamples: 250n }),
+});
+const snapshotAfterRoll = frame({
+  type: TYPE_SNAPSHOT,
+  sequence: 8,
+  ringEventsDropped: 0,
+  sentTicks: SENT + 70_000_000n,
+  wallUtc: WALL + 70_000_000n,
+  instrument: 0,
+  payload: snapshotPayload({ eventsDrained: 510n, bytesAllocatedOnPublisher: 0n, handlerSamples: 3n }),
+});
+
 writeFileSync(join(OUT, "hello.bin"), hello);
+writeFileSync(join(OUT, "hello-base.bin"), helloBase);
 writeFileSync(join(OUT, "hello-empty.bin"), helloEmpty);
+writeFileSync(join(OUT, "hello-rolled.bin"), helloRolled);
+writeFileSync(join(OUT, "event-contract-rolled.bin"), eventContractRolled);
 writeFileSync(join(OUT, "heartbeat.bin"), heartbeat);
 writeFileSync(join(OUT, "snapshot.bin"), snapshot);
-writeFileSync(join(OUT, "stream.bin"), Buffer.concat([hello, heartbeat, snapshot, snapshot0]));
+writeFileSync(join(OUT, "stream.bin"), Buffer.concat([helloBase, heartbeat, snapshot, snapshot0]));
 writeFileSync(join(OUT, "snapshot-step2.bin"), snapshotStep2);
 writeFileSync(join(OUT, "snapshot-step2-unavailable.bin"), snapshotStep2Unavailable);
-writeFileSync(join(OUT, "stream-step2.bin"), Buffer.concat([hello, heartbeat, snapshotStep2, snapshot0]));
+writeFileSync(join(OUT, "stream-step2.bin"), Buffer.concat([helloBase, heartbeat, snapshotStep2, snapshot0]));
+writeFileSync(
+  join(OUT, "stream-roll.bin"),
+  Buffer.concat([hello, snapshotBeforeRoll, helloRolled, eventContractRolled, snapshotAfterRoll]),
+);
 
 console.log("wrote golden files to", OUT);

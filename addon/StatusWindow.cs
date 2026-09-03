@@ -23,6 +23,8 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         private readonly TextBlock _pipeName;
         private readonly TextBlock _connection;
         private readonly TextBlock _instruments;
+        private readonly TextBlock _identities;
+        private readonly TextBlock _rolls;
         private readonly TextBlock _eventsDrained;
         private readonly TextBlock _drops;
         private readonly TextBlock _framesSent;
@@ -39,8 +41,8 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         public StatusWindow()
         {
             Caption = "Obsidian Flow MCP";
-            Width = 720;
-            Height = 460;
+            Width = 760;
+            Height = 600;
 
             Grid grid = new Grid();
             grid.Margin = new Thickness(12);
@@ -51,6 +53,11 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             _pipeName = AddRow(grid, ref row, "Pipe");
             _connection = AddRow(grid, ref row, "Connection");
             _instruments = AddRow(grid, ref row, "Instruments");
+            _identities = AddRow(grid, ref row, "Resolved as");
+            _identities.TextWrapping = TextWrapping.Wrap;
+            _identities.FontFamily = new System.Windows.Media.FontFamily("Consolas");
+            _rolls = AddRow(grid, ref row, "Contract rolls");
+            _rolls.TextWrapping = TextWrapping.Wrap;
             _eventsDrained = AddRow(grid, ref row, "Events drained");
             _drops = AddRow(grid, ref row, "Drops");
             _framesSent = AddRow(grid, ref row, "Frames sent");
@@ -114,8 +121,11 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                 Engine engine = Engine.Instance;
                 Publisher publisher = engine.Publisher;
                 InstrumentFeed[] feeds = engine.Feeds;
+                UnresolvedInstrument[] unresolved = engine.Unresolved;
 
-                _instruments.Text = feeds.Length.ToString();
+                _instruments.Text = feeds.Length.ToString() + " subscribed"
+                    + (unresolved.Length > 0 ? ", " + unresolved.Length.ToString() + " unresolved" : "");
+                _identities.Text = DescribeIdentities(feeds, unresolved);
 
                 if (!AllocationProbe.IsAvailable)
                 {
@@ -142,6 +152,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                     _handlers.Text = "-";
                     _serialize.Text = "-";
                     _dump.Text = "-";
+                    _rolls.Text = "-";
                 }
                 else
                 {
@@ -181,6 +192,12 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                     LatencySummary ser = publisher.SerializeSummary;
                     _serialize.Text = "p99 " + FormatUs(ser.P99Ns) + " us  (p50 " + FormatUs(ser.P50Ns)
                         + " us, max " + FormatUs(ser.MaxNs) + " us, n=" + ser.Count.ToString() + ")";
+
+                    long rolls = publisher.RollsTotal;
+                    string lastRoll = publisher.LastRoll;
+                    _rolls.Text = rolls == 0
+                        ? "none (root entries re-checked once a minute and at session boundaries)"
+                        : rolls.ToString() + "; last: " + (lastRoll ?? "-");
 
                     string dumpPath = publisher.DumpPath;
                     if (string.IsNullOrEmpty(dumpPath))
@@ -230,7 +247,57 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             return (ns / 1000.0).ToString("0.0", CultureInfo.InvariantCulture);
         }
 
-        // One entry per distinct handler thread: "thread 12: 4096 B (ES 06-26 data, NQ 06-26 data)".
+        // One line per config entry: what was typed, what it resolved to, type, exchange, expiry
+        // and shape; then one line per entry that did not resolve, with the reason. Identity
+        // records are immutable and the feed array is a snapshot, so this is all plain reads.
+        private static string DescribeIdentities(InstrumentFeed[] feeds, UnresolvedInstrument[] unresolved)
+        {
+            StringBuilder sb = new StringBuilder(256);
+            DateTime now = DateTime.Now;
+            for (int i = 0; i < feeds.Length; i++)
+            {
+                InstrumentIdentity id = feeds[i].Identity;
+                if (sb.Length > 0)
+                    sb.Append(Environment.NewLine);
+                if (id == null)
+                {
+                    sb.Append(feeds[i].InstrumentName).Append(": no identity");
+                    continue;
+                }
+                sb.Append(id.ResolvedFrom).Append(" -> ").Append(id.FullName);
+                sb.Append("  [").Append(id.InstrumentType);
+                if (id.Exchange.Length > 0)
+                    sb.Append(", ").Append(id.Exchange);
+                if (id.Currency.Length > 0)
+                    sb.Append(", ").Append(id.Currency);
+                sb.Append("]  expiry ").Append(id.ExpiryText());
+                if (id.IsExpiredAt(now))
+                    sb.Append(" (EXPIRED)");
+                sb.Append("  ").Append(ShapeLabel(id.Shape));
+                if (id.RollCount > 0)
+                    sb.Append("  rolled x").Append(id.RollCount.ToString());
+            }
+            for (int i = 0; i < unresolved.Length; i++)
+            {
+                if (sb.Length > 0)
+                    sb.Append(Environment.NewLine);
+                sb.Append(unresolved[i].Typed).Append(" -> UNRESOLVED: ").Append(unresolved[i].Reason);
+            }
+            return sb.Length == 0 ? "-" : sb.ToString();
+        }
+
+        private static string ShapeLabel(InstrumentShape shape)
+        {
+            switch (shape)
+            {
+                case InstrumentShape.FullyQualified: return "as typed (contract month given)";
+                case InstrumentShape.Root: return "root -> front contract";
+                case InstrumentShape.Direct: return "direct";
+                default: return "?";
+            }
+        }
+
+        // One entry per distinct handler thread: "thread 12: 4096 B (<instrument> data, <instrument> data)".
         // Feeds whose probe has not run yet are listed as "no probe yet". At most a handful of
         // threads exist, so the nested scan is fine at 2 Hz on the UI thread.
         private static string DescribeThreadAllocations(InstrumentFeed[] feeds)

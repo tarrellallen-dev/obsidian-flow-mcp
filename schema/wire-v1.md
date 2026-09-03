@@ -48,10 +48,15 @@ any publisher-to-client figure is an estimate, labelled as one (see "Staleness" 
 is a protocol violation, not a large frame: the client drops the connection and reconnects. The
 publisher treats the same condition as a bug and throws rather than truncating.
 
-## Frame types in build steps 1 and 2
+## Frame types in build steps 1, 2 and 2.5
 
-Steps 1 and 2 emit types 3, 4 and 1 only. Types 2, 16 and 17 are reserved here and defined in a later
-revision of this document.
+Steps 1 and 2 emit types 3, 4 and 1. Step 2.5 adds type 2 (event) with one event kind,
+`contractRolled`, and extends the hello additively. Types 16 and 17 are reserved here and
+defined in a later revision of this document.
+
+Instrument names in this document and in the golden files (for example `ES 12-26`) are
+**examples**; the AddOn never hardcodes a contract month and the config default is a bare
+root (see `addon/README.md`, "Instrument names").
 
 ### type 3 - hello
 
@@ -74,7 +79,97 @@ then `count` entries, packed with no padding:
 +11+n   8     f64    pointValue
 ```
 
-Entry size is `19 + nameLen`. Payload size is `10 + sum(19 + nameLen)`.
+Entry size is `19 + nameLen`. The base table is `10 + sum(19 + nameLen)` bytes.
+
+`name` is the **resolved** NinjaTrader name (`Instrument.FullName`), never what the user typed.
+
+#### identity section (step 2.5, additive)
+
+Immediately after the last base entry. A step-1/step-2 publisher ends the payload there; a
+decoder that finds the payload ending exactly after the base table reports every identity as
+absent and the unresolved list as empty. Otherwise:
+
+```
+offset  size  type   field
++0      2     u16    identityCount     must equal count
+```
+
+then `identityCount` entries, in the same order as the base table:
+
+```
++0      2     u16    index             same value as the base entry it describes
++2      ...          identity block    see "identity block" below
+```
+
+then:
+
+```
++0      2     u16    unresolvedCount   config entries that produced no subscription
+```
+
+then `unresolvedCount` entries of two ASCII strings, each u8-length-prefixed:
+
+```
++0      1+n   str    typed             the config entry as written
++1+n    1+m   str    reason            why it did not resolve or subscribe
+```
+
+Unresolved entries have no index and never appear in a frame header. Nothing may follow the
+last unresolved entry.
+
+#### identity block
+
+The fingerprint of one subscription, produced once when the instrument was resolved (and once
+more per roll). Identical layout in the hello identity section and in the `contractRolled`
+event. Strings are ASCII with a u8 length (0..255); a string the AddOn could not fill is
+present with length 0. Sizes below are for zero-length strings; each string adds its length.
+
+```
+offset  size  type   field
++0      1     u8     shape             1 fullyQualified (typed with a contract month, used as-is,
+                                       never re-resolved), 2 root (bare futures root, resolved
+                                       to the front contract, re-checked for rolls), 3 direct
+                                       (non-futures symbol, resolved as typed, never re-resolved)
++1      1     u8     resolvedBy        1 asTyped (GetInstrument returned the instrument used),
+                                       2 nt8Default (GetInstrument(root) returned a live
+                                       contract chosen by NinjaTrader), 3 rolloverTable
+                                       (NinjaTrader's rollover table named the current
+                                       contract), 4 nextExpiry (MasterInstrument.GetNextExpiry
+                                       named the nearest live contract)
++2      1+n   str    resolvedFrom      the config entry exactly as typed (trimmed)
++3      1+n   str    fullName          Instrument.FullName, the same value as the base entry's name
++4      1+n   str    masterName        MasterInstrument.Name, e.g. the root of a futures product
++5      1+n   str    instrumentType    MasterInstrument.InstrumentType as its enum name
+                                       (Future, Stock, Index, Forex, CryptoCurrency, ...)
++6      1+n   str    exchange          Instrument.Exchange enum name
++7      1+n   str    currency          MasterInstrument.Currency enum name
++8      1+n   str    tradingHours      trading-hours template name
++9      8     i64    expiryTicks       .NET ticks of the expiry date (calendar date, no time
+                                       zone; 00:00 of that day). 0 = the instrument does not
+                                       expire (everything that is not a future or option)
++17     8     f64    tickSize          same value as the base entry
++25     8     f64    pointValue        same value as the base entry
++33     8     i64    rolledAtUtc       DateTime.UtcNow ticks of the last roll of this config
+                                       entry in this AddOn process; 0 = never rolled
++41     2     u16    rollCount         rolls of this config entry in this AddOn process
+```
+
+Fixed part is 43 bytes; with seven strings the block is `43 + sum(stringLen)` bytes.
+
+An instrument is identified unambiguously by `fullName` together with `masterName`,
+`instrumentType`, `exchange` and `expiryTicks`; a consumer that stores history labels it with
+the whole block, and when `rollCount` changes between two hellos for the same `resolvedFrom`
+the two contracts are different series.
+
+#### re-announcement
+
+A hello may arrive again **on the same connection**, after a `contractRolled` event's cause.
+Indices are unchanged; the identity at the rolled index is replaced. The client must
+re-validate its table against the new hello: an index that is absent from the new table is
+dropped, an index whose `fullName` changed starts a new series (its cached snapshot is
+discarded, never merged with the previous contract's), and an unchanged index keeps its state.
+The re-announced hello goes out **before** the `contractRolled` event and before any snapshot
+of the new contract.
 
 `stopwatchFrequency` is what makes `sentTicks` interpretable. It is not assumed to be 10 MHz and
 it differs between machines. A client that has it can convert a difference of two `sentTicks`
@@ -105,6 +200,38 @@ does not ship.
 Empty payload (`length == 32`). `instrument` is `0xFFFF`. Sent every 1000 ms while a client is
 connected. A client that has seen no frame of any type for several heartbeat intervals should
 treat the connection as dead and reconnect.
+
+### type 2 - event
+
+Discrete events (spec section 5) that bypass the snapshot rate limit. `instrument` is the
+index the event concerns, or `0xFFFF` for process-wide events.
+
+```
+offset  size  type   field
++0      2     u16    eventKind         1 contractRolled; other values reserved
++2      2     u16    reserved          always 0
++4      ...          body              per eventKind
+```
+
+A decoder keeps an unknown `eventKind` as opaque rather than rejecting the frame.
+
+#### eventKind 1 - contractRolled
+
+Sent once per roll, right after the re-announced hello, before any snapshot of the new
+contract under that index. Only instruments whose config entry was a bare root ever roll.
+
+```
+offset  size  type   field
++4      8     i64    rolledAtUtc       DateTime.UtcNow ticks of the roll; equals the new
+                                       identity's rolledAtUtc
++12     ...          previous          identity block of the contract that was unsubscribed
++...    ...          next              identity block of the contract now subscribed
+```
+
+The frame header's `sequence` is the boundary: every frame for this index with a lower
+sequence on this connection belongs to `previous`, every higher one to `next`. Contract-specific
+state accumulated by the AddOn for that index (rings, counters, sample positions) was reset at
+the roll; the handler latency histograms, which measure code and not the contract, were kept.
 
 ### type 1 - snapshot
 
@@ -216,11 +343,19 @@ tested against them so a layout change cannot pass silently.
 
 | File | Contents |
 |---|---|
-| `hello.bin` | hello, 2 instruments |
-| `hello-empty.bin` | hello, 0 instruments |
+| `hello.bin` | hello, 2 instruments, with the step-2.5 identity section (one root entry, one fully qualified entry) and one unresolved entry |
+| `hello-base.bin` | hello, 2 instruments, base table only (byte-identical to the step-2 `hello.bin`); still valid, identities decode as absent |
+| `hello-empty.bin` | hello, 0 instruments, base table only |
+| `hello-rolled.bin` | re-announced hello after index 0 rolled: same indices, new identity, rollCount 1 |
+| `event-contract-rolled.bin` | type 2, eventKind 1, for index 0, previous and next identity blocks |
 | `heartbeat.bin` | heartbeat, empty payload |
 | `snapshot.bin` | step-1 snapshot (24-byte payload) for instrument index 1; still valid, still decoded |
 | `snapshot-step2.bin` | step-2 snapshot (160-byte payload) for instrument index 1 |
 | `snapshot-step2-unavailable.bin` | step-2 snapshot whose allocation fields are all -1 |
-| `stream.bin` | hello + heartbeat + 2 step-1 snapshots concatenated, for the splitter test |
-| `stream-step2.bin` | hello + heartbeat + step-2 snapshot + step-1 snapshot, mixed sizes |
+| `stream.bin` | base hello + heartbeat + 2 step-1 snapshots concatenated, for the splitter test |
+| `stream-step2.bin` | base hello + heartbeat + step-2 snapshot + step-1 snapshot, mixed sizes |
+| `stream-roll.bin` | hello + snapshot(0) + re-announced hello + contractRolled(0) + snapshot(0): a roll mid-connection |
+
+The snapshot goldens and both `stream*.bin` files from steps 1 and 2 are byte-identical to
+their step-2 versions; only `hello.bin` was regenerated for step 2.5, and its previous bytes
+live on as `hello-base.bin`.
