@@ -130,6 +130,7 @@ function snapshotFrame(
       bytesAllocatedOnPublisher: 0n,
       handlerSamples: BigInt(sequence),
       instrumentation: null,
+      market: null,
     },
   };
 }

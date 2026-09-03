@@ -11,8 +11,12 @@ import type {
   HandlerLatency,
   HelloInstrument,
   InstrumentIdentity,
+  MarketBlock,
+  ProfileRecord,
   SnapshotPayload,
   UnresolvedInstrument,
+  WireProfileCheckpoint,
+  WireProfileLevel,
 } from "../wire/decoder.js";
 import { FrameType, dotnetTicksToIso, expiryTicksToDate } from "../wire/decoder.js";
 
@@ -61,6 +65,8 @@ export interface InstrumentSlot {
   offsetNs: bigint | null;
   sequence: number;
   droppedTotal: number;
+  /** wallUtc from the header of the cached snapshot; null until one arrives. */
+  snapshotWallUtc: bigint | null;
 }
 
 /**
@@ -173,6 +179,156 @@ export interface InstrumentHealth {
   rolledAt: string | null;
   rollCount: number;
   previousName: string | null;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Step-4 market views. Every read carries the same envelope: the resolved instrument, freshness,
+// the two staleness numbers (plus stalenessMs, the measured one), sequence, ring drops, depth
+// availability and whether the AddOn sent a market block at all.
+// ---------------------------------------------------------------------------------------------
+
+export type ProfileScope = "session" | "prior" | "composite";
+
+export interface InstrumentRef {
+  index: number;
+  name: string;
+  resolvedFrom: string;
+  identity: IdentityView | null;
+}
+
+/** Whether the last snapshot carried the step-3 market block. */
+export interface MarketAvailability {
+  status: "present" | "absent" | "none";
+  reason: string | null;
+}
+
+export interface DepthAvailability {
+  state: "live" | "unavailable";
+  reason: string | null;
+}
+
+export interface ReadEnvelope {
+  instrument: InstrumentRef;
+  freshness: Freshness;
+  /** Measured receive-to-serve age of the cached snapshot in ms; null when nothing is cached. */
+  stalenessMs: number | null;
+  staleness: Staleness;
+  sequence: number;
+  droppedTotal: number;
+  depth: DepthAvailability;
+  market: MarketAvailability;
+  /** From the frame header of the cached snapshot. */
+  snapshotWallUtc: string | null;
+}
+
+export interface SessionView {
+  known: boolean;
+  inSession: boolean;
+  begin: string | null;
+  end: string | null;
+}
+
+export interface PriceView {
+  last: number | null;
+  lastSize: number;
+  /** none | bid (seller hit the bid) | ask (buyer lifted the offer) | between | unknown. */
+  lastAggressor: string;
+  bid: number | null;
+  ask: number | null;
+  spreadTicks: number | null;
+  sessionOpen: number | null;
+  sessionHigh: number | null;
+  sessionLow: number | null;
+  /** History bars folded in plus tape. */
+  sessionVolume: number;
+  tapeVolume: number;
+  tradeCount: number;
+  tickSize: number;
+  pointValue: number;
+  session: SessionView;
+}
+
+export interface VwapView {
+  vwap: number | null;
+  stdDev: number | null;
+  sd1Upper: number | null;
+  sd1Lower: number | null;
+  sd2Upper: number | null;
+  sd2Lower: number | null;
+  priceVsVwapTicks: number | null;
+  volume: number;
+  includesHistory: boolean;
+}
+
+export interface CoverageView {
+  historyState: string;
+  historyResolution: string;
+  historyFromWallUtc: string | null;
+  historyToWallUtc: string | null;
+  tapeFromWallUtc: string | null;
+  historyError: string | null;
+  /** True when any tape volume is in the session profile: bid/ask figures exist from tapeFrom on. */
+  bidAskSplitPresent: boolean;
+}
+
+export interface NodeView {
+  price: number;
+  kind: string;
+  strength: number;
+  volume: number;
+}
+
+export interface CheckpointView {
+  at: string | null;
+  poc: number | null;
+  vah: number | null;
+  val: number | null;
+}
+
+export interface LevelView {
+  price: number;
+  volume: number;
+  historyVolume: number;
+  tapeVolume: number;
+  /** Null when the level has no tape volume: the split exists for live tape only. */
+  bidVolume: number | null;
+  askVolume: number | null;
+  /** Tape prints inside the spread, attributable to neither side. */
+  unattributedVolume: number | null;
+}
+
+export interface ProfileView {
+  scope: ProfileScope;
+  available: boolean;
+  reason: string | null;
+  poc: number | null;
+  vah: number | null;
+  val: number | null;
+  pocVolume: number;
+  valueAreaVolume: number;
+  totalVolume: number;
+  tapeVolume: number;
+  outOfRangeVolume: number;
+  rangeLow: number | null;
+  rangeHigh: number | null;
+  bidAskSplit: "live-tape-only" | "unavailable";
+  includesHistory: boolean;
+  /** Prior only: true while the current session has not traded through the prior POC. */
+  nakedPoc: boolean | null;
+  /** Prior only: "live" when promoted from a session the AddOn watched whole, else "history". */
+  source: "live" | "history" | null;
+  nodes: NodeView[];
+  developing: { latest: CheckpointView | null; count: number; series?: CheckpointView[] };
+  histogram?: LevelView[];
+  histogramLevels?: number;
+}
+
+export interface MarketRead {
+  envelope: ReadEnvelope;
+  price: PriceView | null;
+  vwap: VwapView | null;
+  coverage: CoverageView | null;
+  block: MarketBlock | null;
 }
 
 export interface CacheHealth {
@@ -295,6 +451,7 @@ export class StateCache {
       slot.receivedAtNs = null;
       slot.offsetNs = null;
       slot.sequence = 0;
+      slot.snapshotWallUtc = null;
     }
     this.pushEvent("connected", "connection " + this.connectionCountValue);
   }
@@ -344,6 +501,7 @@ export class StateCache {
       slot.offsetNs = offsetNs;
       slot.sequence = frame.header.sequence;
       slot.droppedTotal += frame.header.ringEventsDropped;
+      slot.snapshotWallUtc = frame.header.wallUtc;
       return;
     }
 
@@ -381,6 +539,7 @@ export class StateCache {
       slot.receivedAtNs = null;
       slot.offsetNs = null;
       slot.sequence = frame.header.sequence;
+      slot.snapshotWallUtc = null;
       this.pushEvent(
         "contractRolled",
         `${ev.previous.resolvedFrom}: ${ev.previous.fullName} -> ${ev.next.fullName} at ${dotnetTicksToIso(ev.rolledAtUtc) ?? "?"} (index ${frame.header.instrument}, sequence ${frame.header.sequence})`,
@@ -679,6 +838,74 @@ export class StateCache {
     };
   }
 
+  // ---------------------------------------------------------------------------------------
+  // Step-4 market reads
+  // ---------------------------------------------------------------------------------------
+
+  /**
+   * The slot a read tool should answer for: the named instrument (resolved name or config
+   * entry as typed), or the only instrument when none is named. Returns an error message
+   * otherwise, so a tool never silently picks one of several.
+   */
+  selectSlot(name?: string): { slot: InstrumentSlot } | { error: string } {
+    if (name) {
+      const slot = this.findSlot(name);
+      if (slot) return { slot };
+      const known = [...this.slots.values()].map((s) => s.name);
+      return {
+        error: `no instrument "${name}" in the current hello table (known: ${known.length ? known.join(", ") : "none"}; helloReceived=${this.helloReceivedValue})`,
+      };
+    }
+    const all = [...this.slots.values()];
+    if (all.length === 1) return { slot: all[0]! };
+    if (all.length === 0) {
+      return { error: `no instruments announced yet (helloReceived=${this.helloReceivedValue}, pipe ${this.pipeStateValue})` };
+    }
+    return { error: `several instruments are announced (${all.map((s) => s.name).join(", ")}); pass name` };
+  }
+
+  private envelopeOf(slot: InstrumentSlot): ReadEnvelope {
+    const snapshot = slot.snapshot;
+    const staleness = this.stalenessOf(slot.receivedAtNs, slot.offsetNs);
+    const market: MarketAvailability =
+      snapshot === null
+        ? { status: "none", reason: "no snapshot received for this instrument on the current connection" }
+        : snapshot.market === null
+          ? { status: "absent", reason: "the AddOn sent a snapshot without the step-3 market block (pre-step-3 build)" }
+          : { status: "present", reason: null };
+    return {
+      instrument: {
+        index: slot.index,
+        name: slot.name,
+        resolvedFrom: slot.identity ? slot.identity.resolvedFrom : slot.name,
+        identity: slot.identity ? identityView(slot.identity) : null,
+      },
+      freshness: this.freshnessFor(slot),
+      stalenessMs: staleness.receiveToServeMs,
+      staleness,
+      sequence: slot.sequence,
+      droppedTotal: slot.droppedTotal,
+      depth: { state: "unavailable", reason: "market depth is not computed in this build step (book state lands in step 6)" },
+      market,
+      snapshotWallUtc: slot.snapshotWallUtc === null ? null : dotnetTicksToIso(slot.snapshotWallUtc),
+    };
+  }
+
+  /** Envelope plus the decoded price, vwap and coverage views; null views when no market block. */
+  readMarket(name?: string): MarketRead | { error: string } {
+    const sel = this.selectSlot(name);
+    if ("error" in sel) return sel;
+    const slot = sel.slot;
+    const block = slot.snapshot?.market ?? null;
+    return {
+      envelope: this.envelopeOf(slot),
+      price: block ? priceView(block) : null,
+      vwap: block ? vwapView(block) : null,
+      coverage: block ? coverageView(block) : null,
+      block,
+    };
+  }
+
   pushEvent(kind: string, detail: string): void {
     this.events.push({ kind, wallUtcMs: Date.now(), detail });
     while (this.events.length > this.eventRingSize) this.events.shift();
@@ -740,5 +967,143 @@ function blankSlot(inst: HelloInstrument): InstrumentSlot {
     offsetNs: null,
     sequence: 0,
     droppedTotal: 0,
+    snapshotWallUtc: null,
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Step-4 view builders. bigint volumes become numbers (they fit), .NET ticks become ISO strings,
+// NaN already became null in the decoder.
+// ---------------------------------------------------------------------------------------------
+
+function ticksIso(ticks: bigint): string | null {
+  return ticks === 0n ? null : dotnetTicksToIso(ticks);
+}
+
+export function priceView(m: MarketBlock): PriceView {
+  const p = m.price;
+  return {
+    last: p.last,
+    lastSize: Number(p.lastSize),
+    lastAggressor: p.lastAggressor,
+    bid: p.bid,
+    ask: p.ask,
+    spreadTicks: p.spreadTicks,
+    sessionOpen: p.sessionOpen,
+    sessionHigh: p.sessionHigh,
+    sessionLow: p.sessionLow,
+    sessionVolume: Number(p.sessionVolume),
+    tapeVolume: Number(p.tapeVolume),
+    tradeCount: Number(p.tradeCount),
+    tickSize: p.tickSize,
+    pointValue: p.pointValue,
+    session: {
+      known: m.flags.sessionKnown,
+      inSession: m.flags.inSession,
+      begin: ticksIso(p.sessionBeginUtc),
+      end: ticksIso(p.sessionEndUtc),
+    },
+  };
+}
+
+export function vwapView(m: MarketBlock): VwapView {
+  const v = m.vwap;
+  return {
+    vwap: v.vwap,
+    stdDev: v.stdDev,
+    sd1Upper: v.sd1Upper,
+    sd1Lower: v.sd1Lower,
+    sd2Upper: v.sd2Upper,
+    sd2Lower: v.sd2Lower,
+    priceVsVwapTicks: v.priceVsVwapTicks,
+    volume: Number(v.volume),
+    includesHistory: v.includesHistory,
+  };
+}
+
+export function coverageView(m: MarketBlock): CoverageView {
+  const c = m.coverage;
+  return {
+    historyState: c.historyState,
+    historyResolution: c.historyResolution,
+    historyFromWallUtc: ticksIso(c.historyFromUtc),
+    historyToWallUtc: ticksIso(c.historyToUtc),
+    tapeFromWallUtc: ticksIso(c.tapeFromUtc),
+    historyError: c.historyError.length > 0 ? c.historyError : null,
+    bidAskSplitPresent: m.flags.bidAskSplitPresent,
+  };
+}
+
+function checkpointView(c: WireProfileCheckpoint): CheckpointView {
+  return { at: ticksIso(c.atUtc), poc: c.poc, vah: c.vah, val: c.val };
+}
+
+export function levelView(l: WireProfileLevel): LevelView {
+  const tape = Number(l.tapeVolume);
+  const volume = Number(l.volume);
+  const bid = Number(l.bidVolume);
+  const ask = Number(l.askVolume);
+  return {
+    price: l.price,
+    volume,
+    historyVolume: volume - tape,
+    tapeVolume: tape,
+    bidVolume: tape > 0 ? bid : null,
+    askVolume: tape > 0 ? ask : null,
+    unattributedVolume: tape > 0 ? tape - bid - ask : null,
+  };
+}
+
+/**
+ * One profile record as a tool response. The histogram is included only on request and the
+ * full developing series only for the volume_profile tool; the summary always carries
+ * POC/VAH/VAL, the latest developing checkpoint and the node list.
+ */
+export function profileView(
+  m: MarketBlock,
+  scope: ProfileScope,
+  options: { includeHistogram?: boolean; includeSeries?: boolean } = {},
+): ProfileView {
+  const r: ProfileRecord = scope === "session" ? m.session : scope === "prior" ? m.prior : m.composite;
+  const reason = r.available
+    ? null
+    : scope === "prior"
+      ? m.coverage.historyState === "failed"
+        ? `prior session unavailable: ${m.coverage.historyError || "history request failed"}`
+        : m.coverage.historyState === "pending"
+          ? "prior session unavailable: history request pending"
+          : m.coverage.historyState === "disabled"
+            ? "prior session unavailable: historyBars is \"none\" in the AddOn config"
+            : "prior session unavailable: no prior-session bars yet"
+      : scope === "composite"
+        ? "composite unavailable: no volume in either the prior or the current session yet"
+        : "session profile unavailable: tick size unknown for this instrument";
+  const latest = r.checkpoints.length > 0 ? checkpointView(r.checkpoints[r.checkpoints.length - 1]!) : null;
+  const view: ProfileView = {
+    scope,
+    available: r.available,
+    reason,
+    poc: r.poc,
+    vah: r.vah,
+    val: r.val,
+    pocVolume: Number(r.pocVolume),
+    valueAreaVolume: Number(r.valueAreaVolume),
+    totalVolume: Number(r.totalVolume),
+    tapeVolume: Number(r.tapeVolume),
+    outOfRangeVolume: Number(r.outOfRangeVolume),
+    rangeLow: r.rangeLow,
+    rangeHigh: r.rangeHigh,
+    bidAskSplit: r.flags.hasBidAskSplit ? "live-tape-only" : "unavailable",
+    includesHistory: r.flags.includesHistory,
+    nakedPoc: scope === "prior" ? (r.available ? r.flags.nakedPoc : null) : null,
+    source: scope === "prior" ? (r.available ? (r.flags.priorFromLive ? "live" : "history") : null) : null,
+    nodes: r.nodes.map((n) => ({ price: n.price, kind: n.kind, strength: n.strength, volume: Number(n.volume) })),
+    developing: { latest, count: r.checkpoints.length },
+  };
+  if (options.includeSeries) view.developing.series = r.checkpoints.map(checkpointView);
+  if (options.includeHistogram) {
+    view.histogram = r.histogram.map(levelView);
+    view.histogramLevels = r.histogram.length;
+  }
+  return view;
 }

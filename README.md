@@ -9,7 +9,8 @@ Apache-2.0.
 
 ## Status
 
-**Build step 2.5 of 10. Transport, instrumentation and instrument identity.** This repository is structured so that
+**Build step 4 of 10. Transport, instrumentation, instrument identity, and the first computed
+state: price, session VWAP and volume profiles.** This repository is structured so that
 data can leave the NinjaTrader process without blocking its data thread, and so that a Node
 process can decode it. Whether it actually does is a measurement. The AddOn now takes that
 measurement of itself - handler durations into a log-linear histogram, allocation counters
@@ -19,22 +20,29 @@ harness that drives it under stated load, and therefore any number worth quoting
 build step 5. Step 2.5 resolves every configured instrument into an identity record (resolved
 name, type, exchange, expiry, tick size, point value, trading hours, roll history) that labels
 every frame, and rolls bare futures roots to the new front contract without restarting.
-Nothing about the market is computed yet.
+Steps 3 and 4 add the first market computation: on the publisher thread, from the drained ring,
+the AddOn keeps a price block, a session VWAP with sigma bands, and session, prior and composite
+volume profiles (POC with a deterministic tie-break, 70 % value area, developing checkpoints,
+HVN/LVN nodes, a histogram window), serializes them after the instrumentation, and the server
+serves them from its cache through four new tools.
 
 What exists today:
 
 - A NinjaTrader 8 AddOn (`addon/`) that subscribes to market data and market depth for the
   configured instruments, copies each event into a blittable struct, pushes it into a
-  single-producer/single-consumer ring, and returns. A publisher thread drains the rings,
-  **discards the contents**, and writes counter frames down a named pipe.
+  single-producer/single-consumer ring, and returns. A publisher thread drains the rings into
+  the calculators and writes snapshot frames down a named pipe.
 - A binary wire format (`schema/wire-v1.md`) with golden files.
-- A TypeScript MCP server (`server/`) with three tools, `health`, `instruments` and
-  `latency_report` (build step 2; the AddOn's own in-process handler and serializer timings with
-  an environment block from `server/orderflow.config.json`), all answering
-  from an in-process cache.
+- A TypeScript MCP server (`server/`) with seven tools, all answering from an in-process
+  cache: `health`, `instruments`, `latency_report` (the AddOn's own in-process handler and
+  serializer timings with an environment block from `server/orderflow.config.json`),
+  `orderflow_snapshot` (the compact first call), `price_state`, `vwap_state` and
+  `volume_profile` (`scope: session | prior | composite`, histogram on request only). Every
+  read says it is a conflated snapshot, carries `stalenessMs`, the sequence and the resolved
+  instrument identity, and states that the bid/ask split is live-tape-only.
 
-What does not exist yet: price state, VWAP, volume profile, book state, DOM dynamics, events,
-the benchmark harness, adapters, and execution. Those are build steps 3 through 10.
+What does not exist yet: book state, DOM dynamics, discrete market events, the benchmark
+harness, adapters, and execution. Those are build steps 5 through 10.
 
 No performance number has been measured, and none is published. See
 `docs/latency-methodology.md` for how any future number will be reported.

@@ -11,6 +11,10 @@
 // a new feed (new rings, new counters) is built and swapped in at the same index, the old one
 // is unsubscribed, the hello is re-announced with the new identity and a contractRolled event
 // carries both identities. Fully qualified and non-futures entries are never re-resolved.
+// Step 3 is where the drained events stop being discarded: each one is handed to its feed's
+// MarketState (price, VWAP, session/prior/composite volume profiles) on this thread, the
+// per-second pass drives session boundaries and the history fold, and WriteSnapshot appends the
+// computed blocks after the step-2 instrumentation. Steady state still allocates nothing here.
 // .NET Framework 4.8. ASCII only.
 
 using System;
@@ -73,9 +77,15 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         private long _nextRollCheckTicks;
         private long _rollsTotal;
         private string _lastRoll;
+        private string _lastMarketError;            // publisher thread only; dedupes reports
 
         private readonly byte[] _frameBuffer;       // preallocated; reused for every frame
         private readonly Thread _thread;
+
+        // Step 3: drain destination, reused for every pass. Rings hand out at most this many
+        // events per Drain call and keep the rest for the next call.
+        private const int ScratchCapacity = 4096;
+        private readonly MdEvent[] _scratch;
 
         // Stop is a plain volatile flag. The event exists only to wake a blocked wait, and it is
         // never disposed while the publisher thread might still touch it (see Dispose).
@@ -136,6 +146,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             _feeds = feeds.ToArray();
             _unresolved = unresolved != null ? unresolved.ToArray() : new UnresolvedInstrument[0];
             _frameBuffer = new byte[MaxFrameBytes];
+            _scratch = new MdEvent[ScratchCapacity];
 
             int n = _feeds.Length;
             _dataHist = new LatencyHistogram[n];
@@ -528,10 +539,11 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             }
         }
 
-        // Ring contents are still discarded in step 2 (no calculators yet); only counts matter.
-        // Drops read out of the rings are held in _pendingDropped until a frame header carries
-        // them. Handler duration samples are drained into the histograms here, and once a
-        // second the percentile summaries are refreshed.
+        // Every drained event is fed to its feed's MarketState on this thread (step 3); depth
+        // events are drained and counted but not yet consumed (step 6). Drops read out of the
+        // rings are held in _pendingDropped until a frame header carries them. Handler duration
+        // samples are drained into the histograms here, and once a second the percentile
+        // summaries are refreshed.
         private int DrainAll()
         {
             int total = 0;
@@ -541,7 +553,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             for (int i = 0; i < _feeds.Length; i++)
             {
                 InstrumentFeed f = _feeds[i];
-                total += f.DataRing.Drain(null);
+                total += DrainInto(f.DataRing, f.State);
                 total += f.DepthRing.Drain(null);
 
                 long dataDropped = f.DataRing.ExchangeDropped();
@@ -587,6 +599,32 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             return total;
         }
 
+        // Empties one ring through the scratch array into the calculators. A calculator fault
+        // must not wedge the ring or end this thread: it is reported and the pass continues.
+        private int DrainInto(SpscRing ring, MarketState state)
+        {
+            int total = 0;
+            for (;;)
+            {
+                int n = ring.Drain(_scratch);
+                if (n <= 0)
+                    break;
+                total += n;
+                try
+                {
+                    for (int k = 0; k < n; k++)
+                        state.Apply(ref _scratch[k]);
+                }
+                catch (Exception ex)
+                {
+                    Volatile.Write(ref _lastError, "calculator: " + ex.Message);
+                }
+                if (n < ScratchCapacity)
+                    break;
+            }
+            return total;
+        }
+
         // ------------------------------------------------------------------
         // Roll detection (step 2.5). Publisher thread only.
         // ------------------------------------------------------------------
@@ -612,6 +650,15 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                 InstrumentFeed feed = _feeds[i];
                 if (feed == null || feed.Identity == null)
                     continue;
+
+                // Step 3: session boundaries, checkpoints and the history fold, once a second.
+                feed.State.Tick(now);
+                string stateError = feed.State.LastError;
+                if (stateError != null && !object.ReferenceEquals(stateError, _lastMarketError))
+                {
+                    _lastMarketError = stateError;
+                    Volatile.Write(ref _lastError, "market state " + feed.InstrumentName + ": " + stateError);
+                }
 
                 bool sessionDue = feed.SessionBoundaryTicks != 0 && now.Ticks >= feed.SessionBoundaryTicks;
                 if (sessionDue)
@@ -656,7 +703,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             // New feed, new rings, new counters: nothing accumulated under the old contract is
             // carried across, and the old MarketData/MarketDepth objects keep their own rings
             // until they are unhooked, so no ring ever has two producers.
-            InstrumentFeed replacement = new InstrumentFeed(next, index, _config.RingCapacity);
+            InstrumentFeed replacement = new InstrumentFeed(next, index, _config);
             if (!replacement.Subscribe(out error))
             {
                 replacement.Dispose();
@@ -976,9 +1023,11 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         }
 
         // Snapshot payload, schema/wire-v1.md "type 1". Step-1 fields first, step-2
-        // instrumentation appended after +24. The serialize timer covers everything from here to
-        // the moment the bytes are handed to the pipe, and is recorded into _serializeHist by
-        // EmitFrame; the pipe write itself is outside the measurement.
+        // instrumentation appended after +24, step-3 market state appended after +160. The
+        // serialize timer covers everything from here to the moment the bytes are handed to the
+        // pipe (including the value-area and node recompute the market block triggers), and is
+        // recorded into _serializeHist by EmitFrame; the pipe write itself is outside the
+        // measurement.
         private void WriteSnapshot(NamedPipeServerStream server, InstrumentFeed feed)
         {
             long t0 = Stopwatch.GetTimestamp();
@@ -1024,6 +1073,8 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             p = PutU64(_frameBuffer, p, (ulong)(data.Drops + depth.Drops)); // +144
             p = PutU64(_frameBuffer, p, (ulong)(data.SampleOverruns + depth.SampleOverruns)); // +152
                                                                             // = 160 bytes
+            // ----- step 3 (additive, variable length; schema/wire-v1.md "step-3 block") -----
+            p = feed.State.Serialize(_frameBuffer, p);                      // +160 ..
 
             EmitFrame(server, FrameTypeSnapshot, (ushort)feed.Index, p, t0);
         }
@@ -1069,16 +1120,17 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         }
 
         // ------------------------------------------------------------------
-        // Little-endian primitive stores.
+        // Little-endian primitive stores. Internal so MarketState can serialize its block into
+        // the same buffer with the same helpers.
         // ------------------------------------------------------------------
-        private static int PutU16(byte[] b, int p, ushort v)
+        internal static int PutU16(byte[] b, int p, ushort v)
         {
             b[p] = (byte)v;
             b[p + 1] = (byte)(v >> 8);
             return p + 2;
         }
 
-        private static int PutU32(byte[] b, int p, uint v)
+        internal static int PutU32(byte[] b, int p, uint v)
         {
             b[p] = (byte)v;
             b[p + 1] = (byte)(v >> 8);
@@ -1087,7 +1139,12 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             return p + 4;
         }
 
-        private static int PutU64(byte[] b, int p, ulong v)
+        internal static int PutI32(byte[] b, int p, int v)
+        {
+            return PutU32(b, p, (uint)v);
+        }
+
+        internal static int PutU64(byte[] b, int p, ulong v)
         {
             b[p] = (byte)v;
             b[p + 1] = (byte)(v >> 8);
@@ -1100,7 +1157,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             return p + 8;
         }
 
-        private static int PutI64(byte[] b, int p, long v)
+        internal static int PutI64(byte[] b, int p, long v)
         {
             return PutU64(b, p, (ulong)v);
         }
@@ -1121,12 +1178,12 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             return PutU32(b, p, (uint)ns);
         }
 
-        private static int PutF64(byte[] b, int p, double v)
+        internal static int PutF64(byte[] b, int p, double v)
         {
             return PutU64(b, p, (ulong)BitConverter.DoubleToInt64Bits(v));
         }
 
-        private static int PutAsciiWithU8Length(byte[] b, int p, string s)
+        internal static int PutAsciiWithU8Length(byte[] b, int p, string s)
         {
             int n = s == null ? 0 : s.Length;
             if (n > 255)

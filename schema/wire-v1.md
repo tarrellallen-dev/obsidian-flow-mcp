@@ -48,11 +48,12 @@ any publisher-to-client figure is an estimate, labelled as one (see "Staleness" 
 is a protocol violation, not a large frame: the client drops the connection and reconnects. The
 publisher treats the same condition as a bug and throws rather than truncating.
 
-## Frame types in build steps 1, 2 and 2.5
+## Frame types in build steps 1, 2, 2.5 and 3
 
 Steps 1 and 2 emit types 3, 4 and 1. Step 2.5 adds type 2 (event) with one event kind,
-`contractRolled`, and extends the hello additively. Types 16 and 17 are reserved here and
-defined in a later revision of this document.
+`contractRolled`, and extends the hello additively. Step 3 extends the snapshot additively with
+the variable-length market block (price, VWAP, coverage, three volume profiles). Types 16 and 17
+are reserved here and defined in a later revision of this document.
 
 Instrument names in this document and in the golden files (for example `ES 12-26`) are
 **examples**; the AddOn never hardcodes a contract month and the config default is a bare
@@ -239,9 +240,11 @@ the roll; the handler latency histograms, which measure code and not the contrac
 push interval (`pushRateHz`, default 100).
 
 The payload has grown additively: build step 1 defined the first 24 bytes, build step 2 appends
-136 bytes of instrumentation after them without moving anything. The schema version stays 1.
-A decoder accepts **either** size and reports the step-2 block as absent when the payload is
-24 bytes long; any other size is a protocol violation.
+136 bytes of instrumentation after them without moving anything, and build step 3 appends a
+variable-length market block after +160. The schema version stays 1. A decoder accepts a
+24-byte payload (step-2 block and market block absent), a 160-byte payload (market block
+absent), or a payload of at least 164 bytes whose `marketBytes` field at +160 ends it exactly;
+any other size is a protocol violation.
 
 #### step-1 block (offsets +0 .. +23)
 
@@ -320,7 +323,172 @@ MarketDepth timers run from handler entry to just after the ring push. Neither i
 NinjaTrader-side time before the handler is entered, the pipe transit, decoding on the
 server, or the MCP hop; those are not measured in build step 2.
 
-Step 2 computes no market state either. This payload grows in later steps; the header does not.
+Step 2 computes no market state. Step 3 does; its block follows. The header does not grow.
+
+#### step-3 block (offsets +160 ..; variable length)
+
+The computed state of spec section 4: `price`, `vwap`, `coverage` and three `profile` records
+(session, prior, composite). All of it is computed on the AddOn's publisher thread from the
+drained ring, on the instrument's trading-hours session, and serialized into the same buffer as
+the rest of the frame. Doubles that are not known are **NaN on the wire** (a decoder reports
+them as null, never as 0). .NET UTC ticks use 0 for "none". Layout:
+
+```
+offset  size  type   field
++160    4     u32    marketBytes         bytes after this field; 164 + marketBytes == payload length
++164    2     u16    marketVersion       1
++166    2     u16    marketFlags         bit0 sessionKnown (trading-hours template answered),
+                                         bit1 inSession (now within [sessionBegin, sessionEnd)),
+                                         bit2 hasBidAsk (both sides of the book known),
+                                         bit3 bidAskSplitPresent (session profile holds tape volume)
+```
+
+price block, 120 bytes:
+
+```
++168    8     f64    last                last trade price (NaN before the first print)
++176    8     i64    lastSize
++184    1     u8     lastAggressor       0 none (no print, or bid/ask unknown when it printed),
+                                         1 bid (print at or below the bid), 2 ask (print at or
+                                         above the ask), 3 between (inside the spread)
++185    1     u8     reserved
++186    2     u16    reserved
++188    4     i32    spreadTicks         (ask - bid) / tickSize rounded; -1 when unknown
++192    8     f64    bid
++200    8     f64    ask
++208    8     f64    sessionOpen         first price of the session (history bar open or first print)
++216    8     f64    sessionHigh
++224    8     f64    sessionLow
++232    8     u64    sessionVolume       history bars folded in plus tape, this session
++240    8     u64    tapeVolume          prints this AddOn saw itself, this session
++248    8     u64    tradeCount          prints this session
++256    8     f64    tickSize            MasterInstrument.TickSize
++264    8     f64    pointValue          MasterInstrument.PointValue
++272    8     i64    sessionBeginUtc     .NET UTC ticks; 0 while the session is unknown
++280    8     i64    sessionEndUtc
+```
+
+vwap block, 68 bytes:
+
+```
++288    8     f64    vwap                volume-weighted mean of print price this session
++296    8     f64    stdDev              sqrt of the volume-weighted Welford variance
++304    8     f64    sd1Upper            vwap + 1 sd
++312    8     f64    sd1Lower
++320    8     f64    sd2Upper
++328    8     f64    sd2Lower
++336    8     f64    priceVsVwapTicks    (last - vwap) / tickSize
++344    8     u64    vwapVolume          weight behind the figure
++352    1     u8     vwapIncludesHistory 1 when BarsRequest bars before attach were folded in at
+                                         typical price (high + low + close) / 3, so that portion
+                                         is a bar approximation
++353    1     u8     reserved
++354    2     u16    reserved
+```
+
+coverage block, 28 bytes plus one string:
+
+```
++356    1     u8     historyState        0 disabled (config historyBars = none), 1 pending,
+                                         2 loaded, 3 failed, 4 notRequested (session bounds not
+                                         known yet)
++357    1     u8     historyResolution   0 none, 1 minuteSpread (1-minute bars, each bar's volume
+                                         spread evenly over the ticks from its low to its high,
+                                         integer remainder to the close), 2 tick (1-tick bars,
+                                         one level per bar at its close)
++358    2     u16    reserved
++360    8     i64    historyFromUtc      open of the first history bar folded in; 0 = no history
++368    8     i64    historyToUtc        close of the last history bar folded in
++376    8     i64    tapeFromUtc         time of the first print this session; 0 = none yet.
+                                         The bid/ask split exists from here forward and never
+                                         before
++384    1+n   str    historyError        reason when historyState is 3, else empty
+```
+
+Bars whose close falls after the first print are not folded in, so history and tape never
+overlap; the gap between `historyToUtc` and `tapeFromUtc` (under one bar) is uncovered and
+reported as such by the two figures.
+
+then three **profile records**, in order: `session`, `prior`, `composite`.
+
+#### profile record
+
+```
+offset  size  type   field
++0      1     u8     available           0 = nothing here (every field below is a placeholder:
+                                         NaN doubles, 0 counts)
++1      1     u8     flags               bit0 hasBidAskSplit (tape volume present; always 0 for
+                                         prior), bit1 includesHistory (BarsRequest bars folded
+                                         in), bit2 nakedPoc (prior only: the current session has
+                                         not traded through the prior POC, i.e. it lies outside
+                                         [sessionLow, sessionHigh]), bit3 outOfRange (some volume
+                                         fell outside the price array and is counted in
+                                         outOfRangeVolume only), bit4 priorFromLive (prior only:
+                                         promoted from a session the AddOn watched whole, rather
+                                         than rebuilt from bars)
++2      2     u16    reserved
++4      8     f64    poc
++12     8     f64    vah
++20     8     f64    val
++28     8     u64    totalVolume         in-range volume
++36     8     u64    pocVolume
++44     8     u64    valueAreaVolume
++52     8     u64    outOfRangeVolume
++60     8     u64    tapeVolume
++68     8     f64    rangeLow            lowest occupied level
++76     8     f64    rangeHigh
++84     2     u16    nodeCount
++86     28*n         nodes               f64 price, f64 strength (0..1), u64 volume, u8 kind
+                                         (1 hvn, 2 lvn), u8 reserved, u16 reserved; ordered by price
+        2     u16    checkpointCount     session record only; 0 for prior and composite
+        32*n         checkpoints         i64 atUtc, f64 poc, f64 vah, f64 val: the developing
+                                         POC/VAH/VAL as they stood at each fixed-time checkpoint
+                                         (config checkpointMinutes from the session open,
+                                         default 30; at most 48)
+        2     u16    histogramCount      at most config histogramLevels (default 64) levels
+                                         starting floor(levels / 2) below the POC, clipped to
+                                         the occupied range; 0 for prior
+        40*n         levels              f64 price, u64 volume, u64 tapeVolume, u64 bidVolume,
+                                         u64 askVolume
+```
+
+Per level, `volume - tapeVolume` is the history share and has no split; `bidVolume` and
+`askVolume` are tape only, and `tapeVolume - bidVolume - askVolume` is tape inside the spread.
+A consumer must present bid/ask as unavailable for a level with `tapeVolume` 0.
+
+The profile maths, identical in `addon/SessionVolumeProfile.cs` and its reference port
+`server/src/profile/volumeProfile.ts` (pinned by `server/test/volumeProfile.test.ts` against
+hand-computed values):
+
+- Levels are indexed by `(price - anchor) / tickSize`; the first price of a session anchors the
+  array (config `profileLevels`, default 8192) at its centre. Prices outside the array are added
+  to `outOfRangeVolume` and nowhere else.
+- **POC** is the level with the most volume. On a tie the level nearer the session VWAP *at the
+  moment the tie arose* wins; with the VWAP unknown, or at equal distance, the lower price wins.
+  Ties are settled as they happen, so the POC is a pure function of the event order.
+- **Value area** is 70 % of in-range volume grown from the POC one level at a time: whichever
+  neighbour (just above the current top, just below the current bottom) holds more volume is
+  taken, both on equal volume, and a side with nothing left beyond the occupied range is never
+  taken. `vah`/`val` are the top and bottom levels reached.
+- **HVN**: volume at least 0.30 x POC volume, strictly above every lower neighbour and at or
+  above every higher neighbour within 2 levels (levels outside the occupied range count as 0);
+  strength = volume / POC volume.
+- **LVN**: strictly between two consecutive HVNs, strictly below every lower neighbour and at or
+  below every higher neighbour within 2 levels, the window confined to the levels strictly
+  between those HVNs; strength = 1 - volume / min(flanking HVN volumes), kept when at least
+  0.50. An empty level between two peaks is therefore an LVN of strength 1.
+- The strongest `maxNodes` (default 16) survive, lower price first on equal strength, and are
+  listed by price.
+- Session boundaries come from the instrument's trading-hours template
+  (`TradingHours.GetNextBeginEnd`) compared with each event's own time stamp, never from a
+  hardcoded clock. At the boundary the session profile is promoted to `prior` when the AddOn saw
+  the whole session (history loaded, or the tape started within a minute of the open) and is
+  otherwise re-fetched as bars; `composite` is rebuilt as prior plus the new session and then
+  grows with every print.
+
+Step-3 payload size is `164 + marketBytes`; the golden `snapshot-step3.bin` is 1479 bytes on
+the wire. The cap is the frame limit: three records at the maximum config (64 nodes, 48
+checkpoints, 1024 levels) are well under 1 MiB.
 
 ## Framing and reconnect
 
@@ -355,7 +523,10 @@ tested against them so a layout change cannot pass silently.
 | `stream.bin` | base hello + heartbeat + 2 step-1 snapshots concatenated, for the splitter test |
 | `stream-step2.bin` | base hello + heartbeat + step-2 snapshot + step-1 snapshot, mixed sizes |
 | `stream-roll.bin` | hello + snapshot(0) + re-announced hello + contractRolled(0) + snapshot(0): a roll mid-connection |
+| `snapshot-step3.bin` | step-3 snapshot for index 1: the seven-print fixture of `server/test/volumeProfile.test.ts` as the session profile (POC 100.50, VAH 101.00, VAL 100.00, three nodes, one checkpoint, six levels), a volume-only prior with a naked POC, and a composite with one history bar in front |
+| `snapshot-step3-unavailable.bin` | step-3 snapshot with nothing computed: NaN prices, session unknown, history failed with a reason, every profile unavailable |
+| `stream-step3.bin` | base hello + heartbeat + step-3 snapshot + step-2 snapshot + step-1 snapshot, three payload sizes on one stream |
 
 The snapshot goldens and both `stream*.bin` files from steps 1 and 2 are byte-identical to
 their step-2 versions; only `hello.bin` was regenerated for step 2.5, and its previous bytes
-live on as `hello-base.bin`.
+live on as `hello-base.bin`. Step 3 added files only; every earlier golden is byte-identical.

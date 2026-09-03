@@ -172,6 +172,80 @@ function snapshotPayloadStep2(step1, s2) {
   return Buffer.concat([head, buf]);
 }
 
+// ---------------------------------------------------------------------------------------------
+// Step-3 market block (schema/wire-v1.md "step-3 block"): u32 marketBytes at +160, then version,
+// flags, price, vwap, coverage and three profile records (session, prior, composite). Unknown
+// doubles are NaN on the wire.
+// ---------------------------------------------------------------------------------------------
+class W {
+  constructor() { this.parts = []; this.size = 0; }
+  push(b) { this.parts.push(b); this.size += b.length; return this; }
+  u8(v) { return this.push(Buffer.from([v])); }
+  u16(v) { const b = Buffer.alloc(2); b.writeUInt16LE(v, 0); return this.push(b); }
+  u32(v) { const b = Buffer.alloc(4); b.writeUInt32LE(v, 0); return this.push(b); }
+  i32(v) { const b = Buffer.alloc(4); b.writeInt32LE(v, 0); return this.push(b); }
+  u64(v) { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(v), 0); return this.push(b); }
+  i64(v) { const b = Buffer.alloc(8); b.writeBigInt64LE(BigInt(v), 0); return this.push(b); }
+  f64(v) { const b = Buffer.alloc(8); b.writeDoubleLE(v === null ? NaN : v, 0); return this.push(b); }
+  str(v) { return this.push(str8(v)); }
+  bytes() { return Buffer.concat(this.parts); }
+}
+
+const NODE_KIND = { hvn: 1, lvn: 2 };
+const AGGRESSOR = { none: 0, bid: 1, ask: 2, between: 3 };
+const HISTORY_STATE = { disabled: 0, pending: 1, loaded: 2, failed: 3, notRequested: 4 };
+const HISTORY_RESOLUTION = { none: 0, minuteSpread: 1, tick: 2 };
+
+function profileRecord(pr) {
+  const w = new W();
+  const f = (pr.hasBidAskSplit ? 1 : 0) | (pr.includesHistory ? 2 : 0) | (pr.nakedPoc ? 4 : 0)
+    | (pr.outOfRange ? 8 : 0) | (pr.priorFromLive ? 16 : 0);
+  w.u8(pr.available ? 1 : 0).u8(f).u16(0);
+  w.f64(pr.poc).f64(pr.vah).f64(pr.val);
+  w.u64(pr.totalVolume ?? 0).u64(pr.pocVolume ?? 0).u64(pr.valueAreaVolume ?? 0).u64(pr.outOfRangeVolume ?? 0).u64(pr.tapeVolume ?? 0);
+  w.f64(pr.rangeLow).f64(pr.rangeHigh);
+  const nodes = pr.nodes ?? [];
+  w.u16(nodes.length);
+  for (const n of nodes) w.f64(n.price).f64(n.strength).u64(n.volume).u8(NODE_KIND[n.kind]).u8(0).u16(0);
+  const cps = pr.checkpoints ?? [];
+  w.u16(cps.length);
+  for (const c of cps) w.i64(c.atUtc).f64(c.poc).f64(c.vah).f64(c.val);
+  const levels = pr.histogram ?? [];
+  w.u16(levels.length);
+  for (const l of levels) w.f64(l.price).u64(l.volume).u64(l.tapeVolume).u64(l.bidVolume).u64(l.askVolume);
+  return w.bytes();
+}
+
+function marketBlock(m) {
+  const w = new W();
+  w.u16(1);
+  w.u16((m.sessionKnown ? 1 : 0) | (m.inSession ? 2 : 0) | (m.hasBidAsk ? 4 : 0) | (m.bidAskSplitPresent ? 8 : 0));
+  const p = m.price;
+  const priceStart = w.size;
+  w.f64(p.last).i64(p.lastSize).u8(AGGRESSOR[p.lastAggressor]).u8(0).u16(0).i32(p.spreadTicks ?? -1);
+  w.f64(p.bid).f64(p.ask).f64(p.sessionOpen).f64(p.sessionHigh).f64(p.sessionLow);
+  w.u64(p.sessionVolume).u64(p.tapeVolume).u64(p.tradeCount).f64(p.tickSize).f64(p.pointValue);
+  w.i64(p.sessionBeginUtc).i64(p.sessionEndUtc);
+  if (w.size - priceStart !== 120) throw new Error("price block is " + (w.size - priceStart) + " bytes, expected 120");
+  const v = m.vwap;
+  const vwapStart = w.size;
+  w.f64(v.vwap).f64(v.stdDev).f64(v.sd1Upper).f64(v.sd1Lower).f64(v.sd2Upper).f64(v.sd2Lower).f64(v.priceVsVwapTicks);
+  w.u64(v.volume).u8(v.includesHistory ? 1 : 0).u8(0).u16(0);
+  if (w.size - vwapStart !== 68) throw new Error("vwap block is " + (w.size - vwapStart) + " bytes, expected 68");
+  const c = m.coverage;
+  w.u8(HISTORY_STATE[c.historyState]).u8(HISTORY_RESOLUTION[c.historyResolution]).u16(0);
+  w.i64(c.historyFromUtc).i64(c.historyToUtc).i64(c.tapeFromUtc).str(c.historyError ?? "");
+  w.push(profileRecord(m.session)).push(profileRecord(m.prior)).push(profileRecord(m.composite));
+  const body = w.bytes();
+  const len = Buffer.alloc(4);
+  len.writeUInt32LE(body.length, 0);
+  return Buffer.concat([len, body]);
+}
+
+function snapshotPayloadStep3(step1, s2, market) {
+  return Buffer.concat([snapshotPayloadStep2(step1, s2), marketBlock(market)]);
+}
+
 // Fixed values so the files are byte-stable across regenerations.
 const SENT = 1234567890123n;
 const WALL = 638000000000000000n;
@@ -379,6 +453,133 @@ const snapshotStep2Unavailable = frame({
   ),
 });
 
+// Step-3 snapshot for instrument index 1. The session profile is the fixture that
+// server/test/volumeProfile.test.ts computes by hand: seven prints at 0.25 ticks giving
+// POC 100.50 (35), VAH 101.00, VAL 100.00, value-area volume 105 of 135, HVN 100.50 (1.0),
+// LVN 100.75 (5/6), HVN 101.25 (6/7). The composite folds one history bar (7 contracts over
+// 99.50..100.00, close 100.00) in front of it. The prior is a volume-only summary with a naked
+// POC. Times are example .NET UTC ticks.
+const STEP2_FIXTURE = {
+  data: { p50: 1299, p99: 8999, p999: 45999, max: 71234, count: 200000n, allocPer1024: 0n, allocTotal: 1536n },
+  depth: { p50: 999, p99: 4599, p999: 12999, max: 30001, count: 100000n, allocPer1024: 0n, allocTotal: 0n },
+  publisherAllocTotal: 8192n,
+  serialize: { p50: 2099, p99: 6999, p999: 19999, max: 25000, count: 12345n },
+  stopwatchFrequency: STOPWATCH_FREQUENCY,
+  ringDropsTotal: 3n,
+  sampleOverrunsTotal: 0n,
+};
+const SESSION_BEGIN = WALL - 36_000_000_000n;      // 1 h before WALL
+const SESSION_END = WALL + 792_000_000_000n;       // 22 h after WALL
+const HISTOGRAM_A = [
+  { price: 100.0, volume: 10n, tapeVolume: 10n, bidVolume: 0n, askVolume: 10n },
+  { price: 100.25, volume: 30n, tapeVolume: 30n, bidVolume: 30n, askVolume: 0n },
+  { price: 100.5, volume: 35n, tapeVolume: 35n, bidVolume: 5n, askVolume: 30n },
+  { price: 100.75, volume: 5n, tapeVolume: 5n, bidVolume: 0n, askVolume: 0n },
+  { price: 101.0, volume: 25n, tapeVolume: 25n, bidVolume: 0n, askVolume: 25n },
+  { price: 101.25, volume: 30n, tapeVolume: 30n, bidVolume: 0n, askVolume: 30n },
+];
+const NODES_A = [
+  { price: 100.5, strength: 1, volume: 35n, kind: "hvn" },
+  { price: 100.75, strength: 5 / 6, volume: 5n, kind: "lvn" },
+  { price: 101.25, strength: 6 / 7, volume: 30n, kind: "hvn" },
+];
+const marketFixture = {
+  sessionKnown: true,
+  inSession: true,
+  hasBidAsk: true,
+  bidAskSplitPresent: true,
+  price: {
+    last: 101.25, lastSize: 30n, lastAggressor: "ask", spreadTicks: 1, bid: 101.0, ask: 101.25,
+    sessionOpen: 99.75, sessionHigh: 101.25, sessionLow: 99.5,
+    sessionVolume: 142n, tapeVolume: 135n, tradeCount: 7n, tickSize: 0.25, pointValue: 50,
+    sessionBeginUtc: SESSION_BEGIN, sessionEndUtc: SESSION_END,
+  },
+  vwap: {
+    vwap: 100.67592592592591, stdDev: 0.41841198250723066,
+    sd1Upper: 101.09433790843315, sd1Lower: 100.25751394341868,
+    sd2Upper: 101.51274989094038, sd2Lower: 99.83910196091145,
+    priceVsVwapTicks: 2.2962962962963616, volume: 135n, includesHistory: false,
+  },
+  coverage: {
+    historyState: "loaded", historyResolution: "minuteSpread",
+    historyFromUtc: SESSION_BEGIN, historyToUtc: WALL - 600_000_000n, tapeFromUtc: WALL - 300_000_000n,
+    historyError: "",
+  },
+  session: {
+    available: true, hasBidAskSplit: true, includesHistory: false, nakedPoc: false, outOfRange: false, priorFromLive: false,
+    poc: 100.5, vah: 101.0, val: 100.0, totalVolume: 135n, pocVolume: 35n, valueAreaVolume: 105n, outOfRangeVolume: 0n, tapeVolume: 135n,
+    rangeLow: 100.0, rangeHigh: 101.25,
+    nodes: NODES_A,
+    checkpoints: [{ atUtc: SESSION_BEGIN + 18_000_000_000n, poc: 100.25, vah: 100.5, val: 100.0 }],
+    histogram: HISTOGRAM_A,
+  },
+  prior: {
+    available: true, hasBidAskSplit: false, includesHistory: true, nakedPoc: true, outOfRange: false, priorFromLive: false,
+    poc: 98.75, vah: 99.25, val: 98.25, totalVolume: 4200n, pocVolume: 610n, valueAreaVolume: 2980n, outOfRangeVolume: 0n, tapeVolume: 0n,
+    rangeLow: 97.5, rangeHigh: 99.5,
+    nodes: [{ price: 98.75, strength: 1, volume: 610n, kind: "hvn" }],
+    checkpoints: [],
+    histogram: [],
+  },
+  composite: {
+    available: true, hasBidAskSplit: true, includesHistory: true, nakedPoc: false, outOfRange: false, priorFromLive: false,
+    poc: 100.5, vah: 101.0, val: 100.0, totalVolume: 142n, pocVolume: 35n, valueAreaVolume: 108n, outOfRangeVolume: 0n, tapeVolume: 135n,
+    rangeLow: 99.5, rangeHigh: 101.25,
+    nodes: NODES_A,
+    checkpoints: [],
+    histogram: [
+      { price: 99.5, volume: 2n, tapeVolume: 0n, bidVolume: 0n, askVolume: 0n },
+      { price: 99.75, volume: 2n, tapeVolume: 0n, bidVolume: 0n, askVolume: 0n },
+      { price: 100.0, volume: 13n, tapeVolume: 10n, bidVolume: 0n, askVolume: 10n },
+      ...HISTOGRAM_A.slice(1),
+    ],
+  },
+};
+
+const snapshotStep3 = frame({
+  type: TYPE_SNAPSHOT,
+  sequence: 9,
+  ringEventsDropped: 0,
+  sentTicks: SENT + 80_000_000n,
+  wallUtc: WALL + 80_000_000n,
+  instrument: 1,
+  payload: snapshotPayloadStep3(
+    { eventsDrained: 1000n, bytesAllocatedOnPublisher: 0n, handlerSamples: 700n },
+    STEP2_FIXTURE,
+    marketFixture,
+  ),
+});
+
+// Nothing computed yet: no prints, session unknown, history request failed. Every price NaN,
+// every profile unavailable, the error string carried.
+const emptyProfile = { available: false, poc: null, vah: null, val: null, rangeLow: null, rangeHigh: null };
+const snapshotStep3Unavailable = frame({
+  type: TYPE_SNAPSHOT,
+  sequence: 10,
+  ringEventsDropped: 0,
+  sentTicks: SENT + 90_000_000n,
+  wallUtc: WALL + 90_000_000n,
+  instrument: 0,
+  payload: snapshotPayloadStep3(
+    { eventsDrained: 0n, bytesAllocatedOnPublisher: 0n, handlerSamples: 0n },
+    STEP2_FIXTURE,
+    {
+      sessionKnown: false, inSession: false, hasBidAsk: false, bidAskSplitPresent: false,
+      price: {
+        last: null, lastSize: 0n, lastAggressor: "none", spreadTicks: -1, bid: null, ask: null,
+        sessionOpen: null, sessionHigh: null, sessionLow: null,
+        sessionVolume: 0n, tapeVolume: 0n, tradeCount: 0n, tickSize: 0.25, pointValue: 50,
+        sessionBeginUtc: 0n, sessionEndUtc: 0n,
+      },
+      vwap: { vwap: null, stdDev: null, sd1Upper: null, sd1Lower: null, sd2Upper: null, sd2Lower: null, priceVsVwapTicks: null, volume: 0n, includesHistory: false },
+      coverage: { historyState: "failed", historyResolution: "none", historyFromUtc: 0n, historyToUtc: 0n, tapeFromUtc: 0n, historyError: "NoDataAvailable: no historical data for the range" },
+      session: emptyProfile,
+      prior: emptyProfile,
+      composite: emptyProfile,
+    },
+  ),
+});
+
 mkdirSync(OUT, { recursive: true });
 // A roll mid-connection: snapshot of the old contract, re-announced hello, the boundary event,
 // snapshot of the new contract, all for index 0.
@@ -415,6 +616,12 @@ writeFileSync(join(OUT, "stream-step2.bin"), Buffer.concat([helloBase, heartbeat
 writeFileSync(
   join(OUT, "stream-roll.bin"),
   Buffer.concat([hello, snapshotBeforeRoll, helloRolled, eventContractRolled, snapshotAfterRoll]),
+);
+writeFileSync(join(OUT, "snapshot-step3.bin"), snapshotStep3);
+writeFileSync(join(OUT, "snapshot-step3-unavailable.bin"), snapshotStep3Unavailable);
+writeFileSync(
+  join(OUT, "stream-step3.bin"),
+  Buffer.concat([helloBase, heartbeat, snapshotStep3, snapshotStep2Unavailable, snapshot0]),
 );
 
 console.log("wrote golden files to", OUT);

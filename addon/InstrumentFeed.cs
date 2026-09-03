@@ -43,6 +43,10 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         private long _dataSampleIndex;    // written only by the MarketData handler thread
         private long _depthSampleIndex;   // written only by the MarketDepth handler thread
 
+        // Step 3: the computed state for this contract. Publisher thread only, from the drained
+        // ring; a handler never touches it. Dies with the feed at a roll.
+        private readonly MarketState _state;
+
         private Instrument _instrument;
         private MarketData _marketData;
         private MarketDepth<MarketDepthRow> _marketDepth;
@@ -81,12 +85,13 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
 
         private int _disposed;
 
-        public InstrumentFeed(InstrumentIdentity identity, int index, int ringCapacity)
+        public InstrumentFeed(InstrumentIdentity identity, int index, Config config)
         {
             _identity = identity;
             _index = index;
-            _dataRing = new SpscRing(ringCapacity);
-            _depthRing = new SpscRing(ringCapacity);
+            _dataRing = new SpscRing(config.RingCapacity);
+            _depthRing = new SpscRing(config.RingCapacity);
+            _state = new MarketState(identity, config);
             _dataSamples = new long[SampleCapacity];
             _depthSamples = new long[SampleCapacity];
             _tickSize = identity != null ? identity.TickSize : 0.0;
@@ -95,6 +100,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         }
 
         public InstrumentIdentity Identity { get { return _identity; } }
+        public MarketState State { get { return _state; } }
 
         // The resolved NT8 name (Instrument.FullName), never what the user typed.
         public string InstrumentName { get { return _identity != null ? _identity.FullName : ""; } }
@@ -225,6 +231,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             ev.Side = 0;
             ev.MarketDataType = (byte)e.MarketDataType;
             ev.StopwatchTicks = t0;
+            ev.TimeTicks = e.Time.Ticks;
 
             _dataRing.Push(ref ev);
 
@@ -265,6 +272,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             ev.Side = (byte)e.MarketDataType;
             ev.MarketDataType = (byte)e.MarketDataType;
             ev.StopwatchTicks = t0;
+            ev.TimeTicks = e.Time.Ticks;
 
             _depthRing.Push(ref ev);
 

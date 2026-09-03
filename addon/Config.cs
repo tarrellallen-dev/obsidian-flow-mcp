@@ -40,6 +40,19 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         // harness). Null or empty disables the dump; nothing is opened.
         public string DumpTo;
 
+        // Step 3 computation (spec section 4). All sized once at start; none is a hot-path knob.
+        // profileLevels: capacity of each per-price volume array, in ticks (the first price of a
+        //   session anchors the array at its centre). histogramLevels: levels around the POC
+        //   carried on the wire. maxNodes: HVN/LVN entries carried. historyBars: "minute"
+        //   (1-minute bars, volume spread over the bar's range), "tick" (1-tick bars) or "none"
+        //   (no BarsRequest; the profile starts at attach). checkpointMinutes: developing
+        //   POC/VAH/VAL are frozen at this interval from the session open.
+        public int ProfileLevels;
+        public int HistogramLevels;
+        public int MaxNodes;
+        public string HistoryBars;
+        public int CheckpointMinutes;
+
         // Null unless the file declared an "execution" object; never written by default.
         public ExecutionConfig Execution;
 
@@ -50,6 +63,11 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             RingCapacity = 65536;
             PipeName = "obsidian-flow-mcp-v1";
             DumpTo = null;
+            ProfileLevels = 8192;
+            HistogramLevels = 64;
+            MaxNodes = 16;
+            HistoryBars = "minute";
+            CheckpointMinutes = 30;
             Execution = null;
         }
 
@@ -128,6 +146,29 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
 
             if (string.IsNullOrEmpty(PipeName))
                 PipeName = "obsidian-flow-mcp-v1";
+
+            if (ProfileLevels < 256)
+                ProfileLevels = 256;
+            if (ProfileLevels > 65536)
+                ProfileLevels = 65536;
+            if (HistogramLevels < 1)
+                HistogramLevels = 1;
+            if (HistogramLevels > 1024)
+                HistogramLevels = 1024;
+            if (MaxNodes < 1)
+                MaxNodes = 1;
+            if (MaxNodes > 64)
+                MaxNodes = 64;
+            if (CheckpointMinutes < 1)
+                CheckpointMinutes = 1;
+            if (CheckpointMinutes > 1440)
+                CheckpointMinutes = 1440;
+            if (HistoryBars == null)
+                HistoryBars = "minute";
+            string mode = HistoryBars.Trim().ToLowerInvariant();
+            if (mode != "minute" && mode != "tick" && mode != "none")
+                mode = "minute";
+            HistoryBars = mode;
         }
 
         private static int RoundUpToPowerOfTwo(int value)
@@ -175,6 +216,22 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
 
             sb.Append("  \"pipeName\": ");
             AppendJsonString(sb, c.PipeName);
+            sb.Append(",\r\n");
+
+            sb.Append("  \"profileLevels\": ");
+            sb.Append(c.ProfileLevels.ToString(CultureInfo.InvariantCulture));
+            sb.Append(",\r\n");
+            sb.Append("  \"histogramLevels\": ");
+            sb.Append(c.HistogramLevels.ToString(CultureInfo.InvariantCulture));
+            sb.Append(",\r\n");
+            sb.Append("  \"maxNodes\": ");
+            sb.Append(c.MaxNodes.ToString(CultureInfo.InvariantCulture));
+            sb.Append(",\r\n");
+            sb.Append("  \"historyBars\": ");
+            AppendJsonString(sb, c.HistoryBars);
+            sb.Append(",\r\n");
+            sb.Append("  \"checkpointMinutes\": ");
+            sb.Append(c.CheckpointMinutes.ToString(CultureInfo.InvariantCulture));
 
             if (!string.IsNullOrEmpty(c.DumpTo))
             {
@@ -285,6 +342,21 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                 if (!string.IsNullOrEmpty(dump))
                     c.DumpTo = dump;
             }
+
+            if (map.TryGetValue("profileLevels", out value))
+                c.ProfileLevels = ToInt(value, c.ProfileLevels);
+            if (map.TryGetValue("histogramLevels", out value))
+                c.HistogramLevels = ToInt(value, c.HistogramLevels);
+            if (map.TryGetValue("maxNodes", out value))
+                c.MaxNodes = ToInt(value, c.MaxNodes);
+            if (map.TryGetValue("historyBars", out value))
+            {
+                string mode = value as string;
+                if (!string.IsNullOrEmpty(mode))
+                    c.HistoryBars = mode;
+            }
+            if (map.TryGetValue("checkpointMinutes", out value))
+                c.CheckpointMinutes = ToInt(value, c.CheckpointMinutes);
 
             if (map.TryGetValue("execution", out value))
             {

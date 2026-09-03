@@ -83,6 +83,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                 // thread inside a handler. Force it here, on this thread, before any handler exists.
                 RuntimeHelpers.RunClassConstructor(typeof(AllocationProbe).TypeHandle);
                 RuntimeHelpers.RunClassConstructor(typeof(LatencyHistogram).TypeHandle);
+                RuntimeHelpers.RunClassConstructor(typeof(MarketState).TypeHandle);
 
                 DateTime now = DateTime.Now;
                 int index = 0;
@@ -101,7 +102,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                         continue;
                     }
 
-                    InstrumentFeed feed = new InstrumentFeed(identity, index, _config.RingCapacity);
+                    InstrumentFeed feed = new InstrumentFeed(identity, index, _config);
                     if (feed.Subscribe(out error))
                     {
                         _feeds.Add(feed);

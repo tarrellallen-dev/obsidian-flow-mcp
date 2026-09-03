@@ -188,10 +188,143 @@ export interface SnapshotInstrumentation {
   sampleOverrunsTotal: bigint;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Step-3 market block (schema/wire-v1.md, "step-3 block"). Unknown doubles are NaN on the wire
+// and null here, so JSON never shows a 0 that looks like a price.
+// ---------------------------------------------------------------------------------------------
+
+export type AggressorName = "none" | "bid" | "ask" | "between" | "unknown";
+
+/** Spec section 4 "price" block. Session figures are from the instrument's trading hours. */
+export interface PriceBlock {
+  last: number | null;
+  lastSize: bigint;
+  lastAggressor: AggressorName;
+  lastAggressorCode: number;
+  /** Null when either side of the book is unknown. */
+  spreadTicks: number | null;
+  bid: number | null;
+  ask: number | null;
+  sessionOpen: number | null;
+  sessionHigh: number | null;
+  sessionLow: number | null;
+  /** History bars folded in plus tape. */
+  sessionVolume: bigint;
+  /** Tape only: prints the AddOn saw itself. */
+  tapeVolume: bigint;
+  tradeCount: bigint;
+  tickSize: number;
+  pointValue: number;
+  /** .NET UTC ticks; 0n when the session is unknown. */
+  sessionBeginUtc: bigint;
+  sessionEndUtc: bigint;
+}
+
+/** Spec section 4 "vwap" block: Welford-weighted session VWAP and its sigma bands. */
+export interface VwapBlock {
+  vwap: number | null;
+  stdDev: number | null;
+  sd1Upper: number | null;
+  sd1Lower: number | null;
+  sd2Upper: number | null;
+  sd2Lower: number | null;
+  priceVsVwapTicks: number | null;
+  /** Total weight (volume) behind the VWAP. */
+  volume: bigint;
+  /** True when BarsRequest bars (typical price x volume) were folded in before the tape. */
+  includesHistory: boolean;
+}
+
+export type HistoryStateName = "disabled" | "pending" | "loaded" | "failed" | "notRequested" | "unknown";
+export type HistoryResolutionName = "none" | "minuteSpread" | "tick" | "unknown";
+
+/** Coverage: what the profile is built from (spec: historyFromWallUtc, tapeFromWallUtc). */
+export interface CoverageBlock {
+  historyState: HistoryStateName;
+  historyStateCode: number;
+  historyResolution: HistoryResolutionName;
+  historyResolutionCode: number;
+  /** .NET UTC ticks; 0n = no history portion. */
+  historyFromUtc: bigint;
+  historyToUtc: bigint;
+  /** .NET UTC ticks of the first tape print in the session; 0n = none yet. */
+  tapeFromUtc: bigint;
+  historyError: string;
+}
+
+export interface WireProfileNode {
+  price: number;
+  strength: number;
+  volume: bigint;
+  kind: "hvn" | "lvn" | "unknown";
+  kindCode: number;
+}
+
+export interface WireProfileCheckpoint {
+  atUtc: bigint;
+  poc: number | null;
+  vah: number | null;
+  val: number | null;
+}
+
+/** One histogram level. bid/ask are tape-only; the history share is volume - tapeVolume. */
+export interface WireProfileLevel {
+  price: number;
+  volume: bigint;
+  tapeVolume: bigint;
+  bidVolume: bigint;
+  askVolume: bigint;
+}
+
+export interface ProfileRecordFlags {
+  hasBidAskSplit: boolean;
+  includesHistory: boolean;
+  nakedPoc: boolean;
+  outOfRange: boolean;
+  priorFromLive: boolean;
+}
+
+/** One profile (session, prior or composite), schema/wire-v1.md "profile record". */
+export interface ProfileRecord {
+  available: boolean;
+  flags: ProfileRecordFlags;
+  poc: number | null;
+  vah: number | null;
+  val: number | null;
+  totalVolume: bigint;
+  pocVolume: bigint;
+  valueAreaVolume: bigint;
+  outOfRangeVolume: bigint;
+  tapeVolume: bigint;
+  rangeLow: number | null;
+  rangeHigh: number | null;
+  nodes: WireProfileNode[];
+  checkpoints: WireProfileCheckpoint[];
+  histogram: WireProfileLevel[];
+}
+
+export interface MarketFlags {
+  sessionKnown: boolean;
+  inSession: boolean;
+  hasBidAsk: boolean;
+  bidAskSplitPresent: boolean;
+}
+
+export interface MarketBlock {
+  version: number;
+  flags: MarketFlags;
+  price: PriceBlock;
+  vwap: VwapBlock;
+  coverage: CoverageBlock;
+  session: ProfileRecord;
+  prior: ProfileRecord;
+  composite: ProfileRecord;
+}
+
 /**
  * Snapshot payload. The step-1 block is always present; `instrumentation` is null when the
- * publisher sent the 24-byte step-1 payload and present when it sent the 160-byte step-2 one.
- * Nothing about the market is computed yet.
+ * publisher sent the 24-byte step-1 payload and present from the 160-byte step-2 payload on;
+ * `market` is null unless the payload carries the variable-length step-3 block after +160.
  */
 export interface SnapshotPayload {
   kind: "snapshot";
@@ -199,6 +332,7 @@ export interface SnapshotPayload {
   bytesAllocatedOnPublisher: bigint;
   handlerSamples: bigint;
   instrumentation: SnapshotInstrumentation | null;
+  market: MarketBlock | null;
 }
 
 export interface UnknownPayload {
@@ -494,10 +628,26 @@ export const SNAPSHOT_PAYLOAD_BYTES = 24;
 /** Step-2 snapshot payload: the step-1 block plus 136 bytes of instrumentation. */
 export const SNAPSHOT_STEP2_PAYLOAD_BYTES = 160;
 
+/** Step-3: the u32 marketBytes field sits at +160; the block follows it. */
+export const SNAPSHOT_MARKET_LENGTH_OFFSET = 160;
+export const SNAPSHOT_MARKET_START = 164;
+
+/** Fixed sizes of the step-3 block, pinned by the golden test. */
+export const MARKET_PRICE_BYTES = 120;
+export const MARKET_VWAP_BYTES = 68;
+export const MARKET_COVERAGE_FIXED_BYTES = 28;
+export const PROFILE_FIXED_BYTES = 84;
+export const PROFILE_NODE_BYTES = 28;
+export const PROFILE_CHECKPOINT_BYTES = 32;
+export const PROFILE_LEVEL_BYTES = 40;
+export const MARKET_VERSION = 1;
+
 function decodeSnapshot(payload: Buffer): SnapshotPayload {
-  if (payload.length !== SNAPSHOT_PAYLOAD_BYTES && payload.length !== SNAPSHOT_STEP2_PAYLOAD_BYTES) {
+  const n = payload.length;
+  const step3 = n > SNAPSHOT_STEP2_PAYLOAD_BYTES;
+  if (n !== SNAPSHOT_PAYLOAD_BYTES && n !== SNAPSHOT_STEP2_PAYLOAD_BYTES && !(step3 && n >= SNAPSHOT_MARKET_START)) {
     throw new WireError(
-      `snapshot payload must be ${SNAPSHOT_PAYLOAD_BYTES} or ${SNAPSHOT_STEP2_PAYLOAD_BYTES} bytes, got ${payload.length}`,
+      `snapshot payload must be ${SNAPSHOT_PAYLOAD_BYTES}, ${SNAPSHOT_STEP2_PAYLOAD_BYTES} or at least ${SNAPSHOT_MARKET_START} bytes, got ${n}`,
     );
   }
   return {
@@ -505,8 +655,213 @@ function decodeSnapshot(payload: Buffer): SnapshotPayload {
     eventsDrained: payload.readBigUInt64LE(0),
     bytesAllocatedOnPublisher: payload.readBigUInt64LE(8),
     handlerSamples: payload.readBigUInt64LE(16),
-    instrumentation:
-      payload.length === SNAPSHOT_STEP2_PAYLOAD_BYTES ? decodeInstrumentation(payload) : null,
+    instrumentation: n >= SNAPSHOT_STEP2_PAYLOAD_BYTES ? decodeInstrumentation(payload) : null,
+    market: step3 ? decodeMarket(payload) : null,
+  };
+}
+
+function readF64OrNull(payload: Buffer, cursor: Cursor, what: string): number | null {
+  const v = readF64(payload, cursor, what);
+  return Number.isNaN(v) ? null : v;
+}
+
+function readU64(payload: Buffer, cursor: Cursor, what: string): bigint {
+  need(payload, cursor, 8, what);
+  const v = payload.readBigUInt64LE(cursor.at);
+  cursor.at += 8;
+  return v;
+}
+
+function readU32(payload: Buffer, cursor: Cursor, what: string): number {
+  need(payload, cursor, 4, what);
+  const v = payload.readUInt32LE(cursor.at);
+  cursor.at += 4;
+  return v;
+}
+
+function readI32(payload: Buffer, cursor: Cursor, what: string): number {
+  need(payload, cursor, 4, what);
+  const v = payload.readInt32LE(cursor.at);
+  cursor.at += 4;
+  return v;
+}
+
+const AGGRESSORS: Record<number, AggressorName> = { 0: "none", 1: "bid", 2: "ask", 3: "between" };
+const HISTORY_STATES: Record<number, HistoryStateName> = {
+  0: "disabled",
+  1: "pending",
+  2: "loaded",
+  3: "failed",
+  4: "notRequested",
+};
+const HISTORY_RESOLUTIONS: Record<number, HistoryResolutionName> = { 0: "none", 1: "minuteSpread", 2: "tick" };
+const NODE_KINDS: Record<number, "hvn" | "lvn"> = { 1: "hvn", 2: "lvn" };
+
+function decodeMarket(payload: Buffer): MarketBlock {
+  const marketBytes = payload.readUInt32LE(SNAPSHOT_MARKET_LENGTH_OFFSET);
+  if (SNAPSHOT_MARKET_START + marketBytes !== payload.length) {
+    throw new WireError(
+      `snapshot marketBytes ${marketBytes} does not end the payload (${payload.length - SNAPSHOT_MARKET_START} bytes follow the field)`,
+    );
+  }
+  const cursor: Cursor = { at: SNAPSHOT_MARKET_START };
+  const version = readU16(payload, cursor, "market version");
+  if (version !== MARKET_VERSION) {
+    throw new WireError(`unsupported market block version ${version}`);
+  }
+  const f = readU16(payload, cursor, "market flags");
+  const flags: MarketFlags = {
+    sessionKnown: (f & 1) !== 0,
+    inSession: (f & 2) !== 0,
+    hasBidAsk: (f & 4) !== 0,
+    bidAskSplitPresent: (f & 8) !== 0,
+  };
+
+  const priceStart = cursor.at;
+  const last = readF64OrNull(payload, cursor, "price last");
+  const lastSize = readI64(payload, cursor, "price lastSize");
+  const lastAggressorCode = readU8(payload, cursor, "price lastAggressor");
+  readU8(payload, cursor, "price reserved");
+  readU16(payload, cursor, "price reserved");
+  const spreadRaw = readI32(payload, cursor, "price spreadTicks");
+  const price: PriceBlock = {
+    last,
+    lastSize,
+    lastAggressor: AGGRESSORS[lastAggressorCode] ?? "unknown",
+    lastAggressorCode,
+    spreadTicks: spreadRaw < 0 ? null : spreadRaw,
+    bid: readF64OrNull(payload, cursor, "price bid"),
+    ask: readF64OrNull(payload, cursor, "price ask"),
+    sessionOpen: readF64OrNull(payload, cursor, "price sessionOpen"),
+    sessionHigh: readF64OrNull(payload, cursor, "price sessionHigh"),
+    sessionLow: readF64OrNull(payload, cursor, "price sessionLow"),
+    sessionVolume: readU64(payload, cursor, "price sessionVolume"),
+    tapeVolume: readU64(payload, cursor, "price tapeVolume"),
+    tradeCount: readU64(payload, cursor, "price tradeCount"),
+    tickSize: readF64(payload, cursor, "price tickSize"),
+    pointValue: readF64(payload, cursor, "price pointValue"),
+    sessionBeginUtc: readI64(payload, cursor, "price sessionBeginUtc"),
+    sessionEndUtc: readI64(payload, cursor, "price sessionEndUtc"),
+  };
+  if (cursor.at - priceStart !== MARKET_PRICE_BYTES) {
+    throw new WireError("price block size drifted from the documented layout");
+  }
+
+  const vwapStart = cursor.at;
+  const vwap: VwapBlock = {
+    vwap: readF64OrNull(payload, cursor, "vwap"),
+    stdDev: readF64OrNull(payload, cursor, "vwap stdDev"),
+    sd1Upper: readF64OrNull(payload, cursor, "vwap sd1Upper"),
+    sd1Lower: readF64OrNull(payload, cursor, "vwap sd1Lower"),
+    sd2Upper: readF64OrNull(payload, cursor, "vwap sd2Upper"),
+    sd2Lower: readF64OrNull(payload, cursor, "vwap sd2Lower"),
+    priceVsVwapTicks: readF64OrNull(payload, cursor, "vwap priceVsVwapTicks"),
+    volume: readU64(payload, cursor, "vwap volume"),
+    includesHistory: readU8(payload, cursor, "vwap includesHistory") !== 0,
+  };
+  readU8(payload, cursor, "vwap reserved");
+  readU16(payload, cursor, "vwap reserved");
+  if (cursor.at - vwapStart !== MARKET_VWAP_BYTES) {
+    throw new WireError("vwap block size drifted from the documented layout");
+  }
+
+  const historyStateCode = readU8(payload, cursor, "coverage historyState");
+  const historyResolutionCode = readU8(payload, cursor, "coverage historyResolution");
+  readU16(payload, cursor, "coverage reserved");
+  const coverage: CoverageBlock = {
+    historyState: HISTORY_STATES[historyStateCode] ?? "unknown",
+    historyStateCode,
+    historyResolution: HISTORY_RESOLUTIONS[historyResolutionCode] ?? "unknown",
+    historyResolutionCode,
+    historyFromUtc: readI64(payload, cursor, "coverage historyFromUtc"),
+    historyToUtc: readI64(payload, cursor, "coverage historyToUtc"),
+    tapeFromUtc: readI64(payload, cursor, "coverage tapeFromUtc"),
+    historyError: readStr8(payload, cursor, "coverage historyError"),
+  };
+
+  const session = decodeProfile(payload, cursor, "session profile");
+  const prior = decodeProfile(payload, cursor, "prior profile");
+  const composite = decodeProfile(payload, cursor, "composite profile");
+
+  if (cursor.at !== payload.length) {
+    throw new WireError(`market block has ${payload.length - cursor.at} trailing bytes`);
+  }
+  return { version, flags, price, vwap, coverage, session, prior, composite };
+}
+
+function decodeProfile(payload: Buffer, cursor: Cursor, what: string): ProfileRecord {
+  const available = readU8(payload, cursor, `${what} available`) !== 0;
+  const f = readU8(payload, cursor, `${what} flags`);
+  readU16(payload, cursor, `${what} reserved`);
+  const flags: ProfileRecordFlags = {
+    hasBidAskSplit: (f & 1) !== 0,
+    includesHistory: (f & 2) !== 0,
+    nakedPoc: (f & 4) !== 0,
+    outOfRange: (f & 8) !== 0,
+    priorFromLive: (f & 16) !== 0,
+  };
+  const poc = readF64OrNull(payload, cursor, `${what} poc`);
+  const vah = readF64OrNull(payload, cursor, `${what} vah`);
+  const val = readF64OrNull(payload, cursor, `${what} val`);
+  const totalVolume = readU64(payload, cursor, `${what} totalVolume`);
+  const pocVolume = readU64(payload, cursor, `${what} pocVolume`);
+  const valueAreaVolume = readU64(payload, cursor, `${what} valueAreaVolume`);
+  const outOfRangeVolume = readU64(payload, cursor, `${what} outOfRangeVolume`);
+  const tapeVolume = readU64(payload, cursor, `${what} tapeVolume`);
+  const rangeLow = readF64OrNull(payload, cursor, `${what} rangeLow`);
+  const rangeHigh = readF64OrNull(payload, cursor, `${what} rangeHigh`);
+
+  const nodeCount = readU16(payload, cursor, `${what} nodeCount`);
+  const nodes: WireProfileNode[] = [];
+  for (let i = 0; i < nodeCount; i++) {
+    const price = readF64(payload, cursor, `${what} node ${i} price`);
+    const strength = readF64(payload, cursor, `${what} node ${i} strength`);
+    const volume = readU64(payload, cursor, `${what} node ${i} volume`);
+    const kindCode = readU8(payload, cursor, `${what} node ${i} kind`);
+    readU8(payload, cursor, `${what} node ${i} reserved`);
+    readU16(payload, cursor, `${what} node ${i} reserved`);
+    nodes.push({ price, strength, volume, kind: NODE_KINDS[kindCode] ?? "unknown", kindCode });
+  }
+
+  const checkpointCount = readU16(payload, cursor, `${what} checkpointCount`);
+  const checkpoints: WireProfileCheckpoint[] = [];
+  for (let i = 0; i < checkpointCount; i++) {
+    checkpoints.push({
+      atUtc: readI64(payload, cursor, `${what} checkpoint ${i} atUtc`),
+      poc: readF64OrNull(payload, cursor, `${what} checkpoint ${i} poc`),
+      vah: readF64OrNull(payload, cursor, `${what} checkpoint ${i} vah`),
+      val: readF64OrNull(payload, cursor, `${what} checkpoint ${i} val`),
+    });
+  }
+
+  const histogramCount = readU16(payload, cursor, `${what} histogramCount`);
+  const histogram: WireProfileLevel[] = [];
+  for (let i = 0; i < histogramCount; i++) {
+    histogram.push({
+      price: readF64(payload, cursor, `${what} level ${i} price`),
+      volume: readU64(payload, cursor, `${what} level ${i} volume`),
+      tapeVolume: readU64(payload, cursor, `${what} level ${i} tapeVolume`),
+      bidVolume: readU64(payload, cursor, `${what} level ${i} bidVolume`),
+      askVolume: readU64(payload, cursor, `${what} level ${i} askVolume`),
+    });
+  }
+
+  return {
+    available,
+    flags,
+    poc,
+    vah,
+    val,
+    totalVolume,
+    pocVolume,
+    valueAreaVolume,
+    outOfRangeVolume,
+    tapeVolume,
+    rangeLow,
+    rangeHigh,
+    nodes,
+    checkpoints,
+    histogram,
   };
 }
 

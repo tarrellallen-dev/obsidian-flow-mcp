@@ -38,7 +38,12 @@ if it does not exist:
   "instruments": [ "ES" ],
   "pushRateHz": 100,
   "ringCapacity": 65536,
-  "pipeName": "obsidian-flow-mcp-v1"
+  "pipeName": "obsidian-flow-mcp-v1",
+  "profileLevels": 8192,
+  "histogramLevels": 64,
+  "maxNodes": 16,
+  "historyBars": "minute",
+  "checkpointMinutes": 30
 }
 ```
 
@@ -60,6 +65,19 @@ if it does not exist:
   The file is
   opened and written only on the publisher thread; a write failure stops the dump and is shown
   in the status window, and never touches a handler. Build step 5's harness reads this file.
+
+- `profileLevels` - capacity of each per-price volume array in ticks (256..65536). The first
+  price of a session anchors the array at its centre; volume that falls outside is counted as
+  `outOfRangeVolume` and reported, never indexed.
+- `histogramLevels` - levels around the POC carried in each snapshot's profile histogram
+  (1..1024). The MCP tools return the histogram only when asked.
+- `maxNodes` - HVN/LVN entries carried per profile (1..64).
+- `historyBars` - `minute` (default: 1-minute `BarsRequest` bars, each bar's volume spread
+  evenly over its price range), `tick` (1-tick bars, one level per print, heavier) or `none`
+  (no history request; the profile starts at attach). History fills the session before the
+  AddOn attached and the prior session; it carries volume only, never a bid/ask split.
+- `checkpointMinutes` - the developing POC/VAH/VAL are frozen at this interval from the
+  session open (1..1440, at most 48 checkpoints kept).
 
 The file is read once at start. Change it, then recompile (F5) or restart NinjaTrader.
 
@@ -127,8 +145,13 @@ subscribed and the reason appears in the status window's connection row.
 | `MdEvent.cs` | Blittable ring slot struct |
 | `SpscRing.cs` | Single-producer/single-consumer ring, drop-newest on full |
 | `InstrumentResolver.cs` | Three config shapes to one identity record; front-contract resolution from NinjaTrader's own roll data; never assumes futures |
-| `InstrumentFeed.cs` | Market data and market depth subscriptions, hot-path handlers |
-| `Publisher.cs` | Publisher thread, named pipe server, frame serialization, roll detection and re-subscription |
+| `InstrumentFeed.cs` | Market data and market depth subscriptions, hot-path handlers; owns the feed's `MarketState` |
+| `Publisher.cs` | Publisher thread, named pipe server, frame serialization, roll detection and re-subscription; drains the rings into the calculators |
+| `MarketState.cs` | Per-instrument coordinator: session boundaries from the trading-hours template, history fold, price/VWAP/profile updates, step-3 serializer |
+| `PriceState.cs` | Last, aggressor, bid/ask, spread, session open/high/low, session and tape volume |
+| `VwapCalculator.cs` | Session VWAP with volume-weighted Welford variance and sigma bands |
+| `SessionVolumeProfile.cs` | Preallocated per-price volume array: POC (deterministic tie-break), 70 % value area, developing checkpoints, HVN/LVN nodes, histogram window; mirrored by `server/src/profile/volumeProfile.ts` |
+| `SessionHistory.cs` | The `BarsRequest` and trading-hours seam, behind try/catch; history is reported unavailable with a reason rather than failing the AddOn |
 | `AllocationProbe.cs` | Reads the per-thread allocation counter; changes no GC setting; -1 sentinel for "unavailable" |
 | `LatencyHistogram.cs` | Hand-rolled log-linear histogram (100 ns .. 1 s, two significant digits) and the once-per-second `LatencySummary` |
 | `StatusWindow.cs` | `NTWindow` status display, refreshed at 2 Hz |
@@ -136,8 +159,17 @@ subscribed and the reason appears in the status window's connection row.
 ## What this build step does
 
 Steps 1 and 2: transport, the threading contract, and instrumentation. Step 2.5: instrument
-identity and rolls (above). The publisher drains the rings, discards the contents, and reports
-counters and its own measurements. Nothing about the market is computed.
+identity and rolls (above). Step 3: the drained events feed calculators. The publisher thread
+hands every `MdEvent` to the feed's `MarketState`; the handlers still only copy, push and return
+(the one addition is `e.Time.Ticks` in the slot, so session bucketing uses the event's own time
+against the trading-hours boundaries rather than the publisher's clock). `MarketState` keeps the
+price block, the session VWAP and three volume profiles (session, prior, composite) in arrays
+sized once from the config, recomputes value area and nodes only over the occupied range and only
+when something changed, and serializes them after the step-2 block (`schema/wire-v1.md`,
+"step-3 block"). History before attach and the prior session come from a chart-free
+`BarsRequest` whose callback only copies bars into arrays; the publisher folds them in on its
+own thread. Everything history-derived is volume only; the bid/ask split exists from the first
+live print forward and the coverage fields say where that is.
 
 Handler timing: each handler stores `Stopwatch` ticks from entry to just after the ring push into
 its own single-writer sample ring. The publisher thread drains those samples into a per-handler

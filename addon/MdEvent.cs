@@ -25,6 +25,9 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         public double Bid;              // last known bid at event time (0 when unknown)
         public double Ask;              // last known ask at event time (0 when unknown)
         public long StopwatchTicks;     // Stopwatch.GetTimestamp() captured at handler entry
+        public long TimeTicks;          // e.Time.Ticks, NinjaTrader's local-time convention. Session
+                                        // bucketing on the publisher thread compares this with the
+                                        // trading-hours boundaries, never the publisher's own clock.
         public int Position;            // MarketDepthEventArgs.Position, -1 for market data events
         public byte Kind;               // MdEventKind
         public byte Operation;          // (byte)Operation for depth events, 0 otherwise

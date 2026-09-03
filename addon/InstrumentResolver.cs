@@ -281,18 +281,13 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         }
 
         // Master lookup by name when GetInstrument(root) returned nothing at all.
-        // VERIFY ON COMPILE: MasterInstrument.DbGet(string). If NT8 8.1.8.2 does not expose it,
-        // return null here; step 1 of Resolve already covers every root NT8 can resolve itself.
+        // NT8 8.1.8.2 has no MasterInstrument.DbGet(string) - the overload takes a database id
+        // (CS1503 on 2026-09-03), so there is no name lookup here. Step 1 of Resolve already
+        // covers every root NT8 can resolve itself, and an unresolvable root is reported with a
+        // reason rather than guessed at.
         private static MasterInstrument FindMasterByName(string name)
         {
-            try
-            {
-                return MasterInstrument.DbGet(name);
-            }
-            catch (Exception)
-            {
-                return null;
-            }
+            return null;
         }
 
         // NT8's rollover table first (its own roll settings: the latest rollover whose date has
@@ -311,12 +306,13 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             {
                 Rollover current = null;
                 List<Rollover> later = new List<Rollover>();
-                List<Rollover> rollovers = master.RolloverCollection;
+                // RolloverCollection is NT8's own collection type, not a List<Rollover>, so it is
+                // enumerated rather than indexed.
+                RolloverCollection rollovers = master.RolloverCollection;
                 if (rollovers != null)
                 {
-                    for (int i = 0; i < rollovers.Count; i++)
+                    foreach (Rollover r in rollovers)
                     {
-                        Rollover r = rollovers[i];
                         if (r == null)
                             continue;
                         if (r.Date <= now)
@@ -385,27 +381,14 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         // Local-clock ticks of the end of the trading session the instrument is in (or the
         // next one), from its trading-hours template. 0 when unavailable; the once-a-minute
         // roll check still runs in that case, only the session-boundary trigger is lost.
-        // VERIFY ON COMPILE: TradingHours.GetNextBeginEnd(DateTime, out DateTime, out DateTime).
+        // NT8 8.1.8.2's TradingHours has no GetNextBeginEnd (CS1061 on 2026-09-03), so there is
+        // no session-boundary trigger for the roll check. Returning 0 means "no boundary known",
+        // which leaves the once-a-minute re-resolve as the only trigger - later by up to a
+        // minute, never wrong. Session start and end for the profile come from the bars series,
+        // not from here.
         public static long NextSessionEndTicks(Instrument instrument, DateTime now)
         {
-            try
-            {
-                if (instrument == null || instrument.MasterInstrument == null)
-                    return 0;
-                TradingHours hours = instrument.MasterInstrument.TradingHours;
-                if (hours == null)
-                    return 0;
-                DateTime begin;
-                DateTime end;
-                hours.GetNextBeginEnd(now, out begin, out end);
-                if (end <= now)
-                    return 0;
-                return end.Ticks;
-            }
-            catch (Exception)
-            {
-                return 0;
-            }
+            return 0;
         }
     }
 }

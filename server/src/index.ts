@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 /**
- * Obsidian Flow MCP server - build step 2.5.
+ * Obsidian Flow MCP server - build step 4.
  *
- * Transport, threading contract, instrumentation, and instrument identity. Three tools, all
- * answering from the in-process cache: `health`, `instruments` and `latency_report`. No market
- * state is computed anywhere in this build step.
+ * Transport, threading contract, instrumentation, instrument identity, and from step 3 on the
+ * computed market state the AddOn publishes: price, session VWAP and the session/prior/composite
+ * volume profiles. Seven tools, all answering from the in-process cache: `health`,
+ * `instruments`, `latency_report`, `orderflow_snapshot`, `price_state`, `vwap_state` and
+ * `volume_profile`. Nothing here recomputes market state; the cache holds what the AddOn sent.
  */
 
 import os from "node:os";
@@ -13,12 +15,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
-import { StateCache } from "./cache/stateCache.js";
+import { StateCache, profileView, type ProfileScope } from "./cache/stateCache.js";
 import { loadServerConfig, type ServerConfig } from "./config.js";
 import { PipeClient, resolveEndpoint, type PipeClientOptions } from "./transport/pipeClient.js";
 
 export const SERVER_NAME = "obsidian-flow-mcp";
-export const SERVER_VERSION = "0.2.5";
+export const SERVER_VERSION = "0.4.0";
 
 /** Spec section 8: every published number carries its environment. Built once per call. */
 export interface EnvironmentBlock {
@@ -215,6 +217,165 @@ export function buildServer(cache: StateCache, config: ServerConfig = loadServer
         helloReceived: cache.helloReceived,
         environment: environmentBlock(config, stopwatchFrequency),
         instruments,
+      });
+    },
+  );
+
+  // ----- step-4 read tools: computed market state from the cache -----
+
+  const CONFLATED =
+    "The data is a CONFLATED SNAPSHOT: the AddOn publishes latest-wins state at its push rate " +
+    "(default 100 Hz) and this process caches the last one per instrument, so consecutive calls " +
+    "may return the same sequence and no intermediate state is ever queued. stalenessMs is the " +
+    "measured receive-to-serve age of the cached snapshot on this process's own clock; " +
+    "staleness.oneWayEstimateMs is an estimate of the publisher-to-client hop and the two are " +
+    "never summed for you. Every response names the resolved instrument (identity) and the " +
+    "frame sequence. `name` selects the instrument by resolved NinjaTrader name or by the AddOn " +
+    "config entry as typed; it may be omitted when exactly one instrument is configured. " +
+    "depth is `unavailable` in this build step because the book is not computed yet - it does " +
+    "not mean the book is empty. market.status is `absent` when the AddOn build predates the " +
+    "market block and `none` before the first snapshot on this connection.";
+
+  const SPLIT =
+    "The bid/ask split is LIVE-TAPE-ONLY: a print at or above the ask counts as ask volume, at " +
+    "or below the bid as bid volume, inside the spread as unattributed. Volume from before the " +
+    "AddOn attached comes from BarsRequest bars (coverage.historyFromWallUtc .. historyToWallUtc, " +
+    "spread evenly across each 1-minute bar's range unless historyBars is \"tick\") and has no " +
+    "split; per level, historyVolume = volume - tapeVolume and bidVolume/askVolume are null where " +
+    "there is no tape volume. coverage.tapeFromWallUtc is where the split starts.";
+
+  const selectError = (error: string) => json({ error, helloReceived: cache.helloReceived, health: cache.health() });
+
+  server.registerTool(
+    "orderflow_snapshot",
+    {
+      title: "Orderflow snapshot",
+      description:
+        "Obsidian Flow MCP: the compact default first call for one instrument. Returns the price " +
+        "block (last, lastSize, lastAggressor, bid, ask, spreadTicks, session open/high/low, " +
+        "sessionVolume, tickSize, pointValue, session bounds from the instrument's trading hours), " +
+        "the session VWAP block (vwap, stdDev, 1 and 2 sigma bands, priceVsVwapTicks), the " +
+        "session and prior volume-profile summaries (POC, VAH, VAL, value-area and total volume, " +
+        "the latest developing checkpoint, HVN/LVN nodes with strength 0-1, prior nakedPoc) with " +
+        "no histogram, plus coverage, staleness and depth availability. For the histogram or the " +
+        "composite scope call volume_profile. " +
+        CONFLATED +
+        " " +
+        SPLIT,
+      inputSchema: {
+        name: z.string().optional().describe("Instrument by resolved name or config entry as typed; optional when only one is configured."),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ name }) => {
+      const read = cache.readMarket(name);
+      if ("error" in read) return selectError(read.error);
+      const block = read.block;
+      return json({
+        ...read.envelope,
+        price: read.price,
+        vwap: read.vwap,
+        profile: block
+          ? {
+              session: profileView(block, "session"),
+              prior: profileView(block, "prior"),
+              compositeAvailable: block.composite.available,
+            }
+          : null,
+        coverage: read.coverage,
+      });
+    },
+  );
+
+  server.registerTool(
+    "price_state",
+    {
+      title: "Price state",
+      description:
+        "Obsidian Flow MCP: the price block for one instrument - last trade (price, size, " +
+        "aggressor: bid = seller hit the bid, ask = buyer lifted the offer, between = inside the " +
+        "spread, none = no bid/ask known when it printed), best bid and ask, spread in ticks, " +
+        "session open/high/low, sessionVolume (history bars plus tape) and tapeVolume (what the " +
+        "AddOn saw itself), tradeCount, tickSize and pointValue from the resolved instrument's " +
+        "MasterInstrument (any asset class), and the session bounds the AddOn took from the " +
+        "instrument's trading-hours template (session.known is false until the template " +
+        "answered). " +
+        CONFLATED,
+      inputSchema: {
+        name: z.string().optional().describe("Instrument by resolved name or config entry as typed; optional when only one is configured."),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ name }) => {
+      const read = cache.readMarket(name);
+      if ("error" in read) return selectError(read.error);
+      return json({ ...read.envelope, price: read.price });
+    },
+  );
+
+  server.registerTool(
+    "vwap_state",
+    {
+      title: "VWAP state",
+      description:
+        "Obsidian Flow MCP: the session VWAP block for one instrument - vwap, stdDev (volume-" +
+        "weighted Welford running variance over trade price), sd1Upper/sd1Lower and " +
+        "sd2Upper/sd2Lower bands, priceVsVwapTicks (last minus vwap, in ticks), the volume " +
+        "behind it and includesHistory (true when BarsRequest bars before attach were folded in " +
+        "at typical price, (high+low+close)/3, so the figure is a bar approximation for that " +
+        "portion). Resets at the session boundary from the instrument's trading hours. Anchored " +
+        "VWAP is not in this build. " +
+        CONFLATED,
+      inputSchema: {
+        name: z.string().optional().describe("Instrument by resolved name or config entry as typed; optional when only one is configured."),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ name }) => {
+      const read = cache.readMarket(name);
+      if ("error" in read) return selectError(read.error);
+      return json({ ...read.envelope, vwap: read.vwap, coverage: read.coverage });
+    },
+  );
+
+  server.registerTool(
+    "volume_profile",
+    {
+      title: "Volume profile",
+      description:
+        "Obsidian Flow MCP: one volume profile for one instrument. scope=session (default) is " +
+        "the current trading session from the instrument's trading hours: POC, 70 % value area " +
+        "(VAH/VAL), POC and value-area volume, total volume, occupied range, HVN/LVN nodes with " +
+        "relative strength 0-1 (HVN strength = volume / POC volume; LVN strength = 1 - volume / " +
+        "smaller flanking HVN), and the developing POC/VAH/VAL series frozen at fixed-time " +
+        "checkpoints from the session open (AddOn config checkpointMinutes, default 30). POC " +
+        "ties are settled deterministically toward the session VWAP. scope=prior is the previous " +
+        "session's POC/VAH/VAL/total, volume-only (no split ever), with nakedPoc = the current " +
+        "session has not traded through it, and source = live (the AddOn watched that session " +
+        "whole) or history (BarsRequest bars). scope=composite is prior plus current session " +
+        "merged. The per-price histogram (price, volume, historyVolume, tapeVolume, " +
+        "bidVolume, askVolume, unattributedVolume) is returned ONLY when includeHistogram is " +
+        "true, capped to the AddOn's histogramLevels (default 64) around the POC; it costs " +
+        "tokens, so ask for it only when the levels themselves matter. " +
+        CONFLATED +
+        " " +
+        SPLIT,
+      inputSchema: {
+        name: z.string().optional().describe("Instrument by resolved name or config entry as typed; optional when only one is configured."),
+        scope: z.enum(["session", "prior", "composite"]).default("session").describe("Which profile: session (default), prior or composite."),
+        includeHistogram: z.boolean().default(false).describe("Include the per-price histogram window around the POC. Default false."),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ name, scope, includeHistogram }) => {
+      const read = cache.readMarket(name);
+      if ("error" in read) return selectError(read.error);
+      const block = read.block;
+      const s: ProfileScope = scope ?? "session";
+      return json({
+        ...read.envelope,
+        profile: block ? profileView(block, s, { includeHistogram: includeHistogram === true, includeSeries: true }) : null,
+        coverage: read.coverage,
       });
     },
   );
