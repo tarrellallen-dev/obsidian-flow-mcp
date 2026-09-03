@@ -1,0 +1,267 @@
+// ObsidianFlow Order-Flow MCP - AddOn
+// Spec sections 2.1 and 3.1: one instrument, two subscriptions, two SPSC rings.
+// The handlers copy into a blittable struct, push, and return. Nothing else.
+// .NET Framework 4.8. ASCII only.
+
+using System;
+using System.Diagnostics;
+using System.Threading;
+using NinjaTrader.Cbi;
+using NinjaTrader.Data;
+
+namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
+{
+    // Per instrument: MarketData subscription -> data ring, MarketDepth subscription -> depth ring.
+    // Two rings because NT8 documents no guarantee that the two subscription objects raise on the
+    // same thread; each is therefore a true single-producer ring. The publisher thread is the
+    // single consumer of both.
+    public sealed class InstrumentFeed : IDisposable
+    {
+        // Power of two. Plain ring of the most recent handler durations in Stopwatch ticks.
+        // Step 2 turns these into a histogram; step 1 only counts them.
+        public const int SampleCapacity = 65536;
+        private const int SampleMask = SampleCapacity - 1;
+
+        private readonly string _instrumentName;
+        private readonly int _index;
+
+        private readonly SpscRing _dataRing;
+        private readonly SpscRing _depthRing;
+
+        // One sample buffer per subscription, each with a single writer thread, so the write is
+        // a plain increment plus a masked store with no interlocked operation at all.
+        private readonly long[] _dataSamples;
+        private readonly long[] _depthSamples;
+        private long _dataSampleIndex;    // written only by the MarketData handler thread
+        private long _depthSampleIndex;   // written only by the MarketDepth handler thread
+
+        private Instrument _instrument;
+        private MarketData _marketData;
+        private MarketDepth<MarketDepthRow> _marketDepth;
+
+        private double _tickSize;
+        private double _pointValue;
+
+        // Data-thread allocation counters. Each handler samples
+        // GC.GetAllocatedBytesForCurrentThread every AllocSampleInterval events into its own
+        // preallocated slot, so the per-event cost is one mask and one compare against zero;
+        // the probe itself runs once every 1024 events. Single writer each, read by the
+        // publisher thread. Step 2 turns first/last into bytes-per-event; step 1 only exposes
+        // them so the non-negotiable in spec 2.1 is measurable rather than asserted.
+        public const int AllocSampleInterval = 1024;
+        private const long AllocSampleMask = AllocSampleInterval - 1;
+
+        private long _dataAllocFirst = -1;
+        private long _dataAllocLast = -1;
+        private long _depthAllocFirst = -1;
+        private long _depthAllocLast = -1;
+
+        private int _disposed;
+
+        public InstrumentFeed(string instrumentName, int index, int ringCapacity)
+        {
+            _instrumentName = instrumentName;
+            _index = index;
+            _dataRing = new SpscRing(ringCapacity);
+            _depthRing = new SpscRing(ringCapacity);
+            _dataSamples = new long[SampleCapacity];
+            _depthSamples = new long[SampleCapacity];
+            _tickSize = 0.0;
+            _pointValue = 0.0;
+        }
+
+        public string InstrumentName { get { return _instrumentName; } }
+        public int Index { get { return _index; } }
+        public SpscRing DataRing { get { return _dataRing; } }
+        public SpscRing DepthRing { get { return _depthRing; } }
+        public double TickSize { get { return _tickSize; } }
+        public double PointValue { get { return _pointValue; } }
+        public bool IsSubscribed { get { return _marketData != null || _marketDepth != null; } }
+
+        // Number of handler duration samples recorded since start. Wraps only at 2^63.
+        public long SampleCount
+        {
+            get { return Volatile.Read(ref _dataSampleIndex) + Volatile.Read(ref _depthSampleIndex); }
+        }
+
+        public long[] DataSampleBuffer { get { return _dataSamples; } }
+        public long[] DepthSampleBuffer { get { return _depthSamples; } }
+
+        // Bytes allocated on the two data threads between the first and the most recent alloc
+        // sample. Returns 0 before two samples exist, and 0 when the host runtime does not expose
+        // the counter (check AllocationProbe.IsAvailable before reporting this as measured).
+        public long DataThreadAllocDelta
+        {
+            get
+            {
+                long first = Volatile.Read(ref _dataAllocFirst);
+                long last = Volatile.Read(ref _dataAllocLast);
+                return first < 0 || last < first ? 0L : last - first;
+            }
+        }
+
+        public long DepthThreadAllocDelta
+        {
+            get
+            {
+                long first = Volatile.Read(ref _depthAllocFirst);
+                long last = Volatile.Read(ref _depthAllocLast);
+                return first < 0 || last < first ? 0L : last - first;
+            }
+        }
+
+        // Called once from the AddOn worker thread. Returns false with a reason when the
+        // instrument cannot be resolved; the AddOn keeps running for the other instruments.
+        public bool Subscribe(out string error)
+        {
+            error = null;
+            try
+            {
+                _instrument = Instrument.GetInstrument(_instrumentName);
+                if (_instrument == null)
+                {
+                    error = "instrument not found: " + _instrumentName;
+                    return false;
+                }
+
+                if (_instrument.MasterInstrument != null)
+                {
+                    _tickSize = _instrument.MasterInstrument.TickSize;
+                    _pointValue = _instrument.MasterInstrument.PointValue;
+                }
+
+                _marketData = new MarketData(_instrument);
+                _marketData.Update += OnMarketDataUpdate;
+
+                _marketDepth = new MarketDepth<MarketDepthRow>(_instrument);
+                _marketDepth.Update += OnMarketDepthUpdate;
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                Dispose();
+                return false;
+            }
+        }
+
+        // ---------------------------------------------------------------------------------
+        // HOT PATH. NT data thread. Copy the args into a blittable struct, push, return.
+        // No allocation, no closures, no strings, no boxing, no locks, no logging, no LINQ.
+        //
+        // Neither handler reads or writes any state the other handler touches. NT8 documents no
+        // guarantee that the two subscription objects raise on the same thread, so sharing a
+        // top-of-book cache between them would be an unsynchronized cross-thread read of a
+        // double. Each event therefore carries only fields it owns; MdEvent.Bid and MdEvent.Ask
+        // are left at 0 by the producer and are reconstructed on the publisher thread, which is
+        // the single consumer of both rings and can order them however the spec requires.
+        // ---------------------------------------------------------------------------------
+        private void OnMarketDataUpdate(object sender, MarketDataEventArgs e)
+        {
+            long t0 = Stopwatch.GetTimestamp();
+
+            MdEvent ev;
+            ev.Kind = MdEventKind.MarketData;
+            ev.Price = e.Price;
+            ev.Size = e.Volume;
+            ev.Bid = 0.0;                       // filled in on the publisher thread
+            ev.Ask = 0.0;                       // filled in on the publisher thread
+            ev.Position = -1;
+            ev.Operation = 0;
+            ev.Side = 0;
+            ev.MarketDataType = (byte)e.MarketDataType;
+            ev.StopwatchTicks = t0;
+
+            _dataRing.Push(ref ev);
+
+            // Single-writer ring write: increment, mask, store. No branch, no atomic.
+            long di = _dataSampleIndex;
+            _dataSamples[(int)(di & SampleMask)] = Stopwatch.GetTimestamp() - t0;
+            Volatile.Write(ref _dataSampleIndex, di + 1);
+
+            // One mask and one compare per event; the probe runs once per AllocSampleInterval.
+            if ((di & AllocSampleMask) == 0L)
+            {
+                long bytes = AllocationProbe.Read();
+                if (_dataAllocFirst < 0)
+                    Volatile.Write(ref _dataAllocFirst, bytes);
+                Volatile.Write(ref _dataAllocLast, bytes);
+            }
+        }
+
+        private void OnMarketDepthUpdate(object sender, MarketDepthEventArgs e)
+        {
+            long t0 = Stopwatch.GetTimestamp();
+
+            MdEvent ev;
+            ev.Kind = MdEventKind.MarketDepth;
+            ev.Price = e.Price;
+            ev.Size = e.Volume;
+            ev.Bid = 0.0;                       // filled in on the publisher thread
+            ev.Ask = 0.0;                       // filled in on the publisher thread
+            ev.Position = e.Position;
+            ev.Operation = (byte)e.Operation;
+            ev.Side = (byte)e.MarketDataType;
+            ev.MarketDataType = (byte)e.MarketDataType;
+            ev.StopwatchTicks = t0;
+
+            _depthRing.Push(ref ev);
+
+            long si = _depthSampleIndex;
+            _depthSamples[(int)(si & SampleMask)] = Stopwatch.GetTimestamp() - t0;
+            Volatile.Write(ref _depthSampleIndex, si + 1);
+
+            if ((si & AllocSampleMask) == 0L)
+            {
+                long bytes = AllocationProbe.Read();
+                if (_depthAllocFirst < 0)
+                    Volatile.Write(ref _depthAllocFirst, bytes);
+                Volatile.Write(ref _depthAllocLast, bytes);
+            }
+        }
+
+        // ---------------------------------------------------------------------------------
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+                return;
+
+            try
+            {
+                if (_marketData != null)
+                {
+                    _marketData.Update -= OnMarketDataUpdate;
+                    _marketData.Dispose();
+                }
+            }
+            catch (Exception)
+            {
+                // Teardown must never throw out of State.Terminated.
+            }
+            finally
+            {
+                _marketData = null;
+            }
+
+            try
+            {
+                if (_marketDepth != null)
+                {
+                    _marketDepth.Update -= OnMarketDepthUpdate;
+                    _marketDepth.Dispose();
+                }
+            }
+            catch (Exception)
+            {
+            }
+            finally
+            {
+                _marketDepth = null;
+            }
+
+            _instrument = null;
+        }
+    }
+}

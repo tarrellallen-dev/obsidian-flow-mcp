@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+*.log
+
+# NinjaTrader build output. addon/ is the single writer; the copy inside NinjaTrader is not.
+bin/
+obj/
