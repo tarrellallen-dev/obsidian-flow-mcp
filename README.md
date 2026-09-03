@@ -74,7 +74,7 @@ the server discards the table and waits for a fresh hello.
 
 See `addon/README.md`. Short version: copy the `.cs` files into
 `Documents\NinjaTrader 8\bin\Custom\AddOns\ObsidianFlow.OrderFlowMcp\`, press F5 in the
-NinjaScript Editor, then open **New > Order-Flow MCP** in the Control Center for the status
+NinjaScript Editor, then open **New > Obsidian Flow MCP** in the Control Center for the status
 window. The AddOn cannot be compiled outside NinjaTrader.
 
 ### Server

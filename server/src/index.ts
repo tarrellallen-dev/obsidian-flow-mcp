@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * NT8 Order-Flow MCP server - build step 2.
+ * Obsidian Flow MCP server - build step 2.
  *
  * Transport, threading contract and instrumentation. Three tools, all answering from the
  * in-process cache: `health`, `instruments` and `latency_report`. No market state is computed
