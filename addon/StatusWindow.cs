@@ -10,12 +10,13 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
 using NinjaTrader.Gui;
+using NinjaTrader.Gui.Tools;
 
 namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
 {
     // Base type is fully qualified with global:: so it cannot be resolved relative to this
     // file's own namespace, which also begins with "NinjaTrader".
-    public class StatusWindow : global::NinjaTrader.Gui.NTWindow
+    public class StatusWindow : NTWindow
     {
         private readonly TextBlock _pipeName;
         private readonly TextBlock _connection;
