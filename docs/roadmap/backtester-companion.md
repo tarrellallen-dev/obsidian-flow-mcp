@@ -28,8 +28,8 @@ code, so a profile level the model sees live is the profile level the backtest u
 
 The backtester ships with no market data. Three sources are supported, in order of fidelity:
 
-1. **Frame logs recorded by this AddOn** (`Publisher` writes the same frames to a file when
-   `recordTo` is set in the config). This is the only source that carries Level 2 depth and the
+1. **Frame logs recorded by this AddOn** (`Publisher` writes the same frames into the
+   backtester's local store when `recordTo` is set in the config). This is the only source that carries Level 2 depth and the
    DOM dynamics, because NinjaTrader does not store historical depth. Record a session live or
    under Market Replay, then backtest against it as often as you like.
 2. **NinjaTrader historical tick export** (Tools > Historical Data > Export, tick or minute).
@@ -39,6 +39,29 @@ The backtester ships with no market data. Three sources are supported, in order 
 
 The README of that repository states this in its first paragraph: you need your own data, here
 is how to get it, here is what each source can and cannot answer.
+
+## Local data store: backtests run with NinjaTrader closed
+
+The backtester owns its data. Everything it ingests -- recorded frame logs, NT8 tick exports,
+third-party files -- is normalised once into a local, append-only store keyed by instrument and
+session (a directory of per-session files in the wire's own binary layout, with an index file;
+no database server, no NinjaTrader dependency at read time). After that, a backtest reads the
+store directly: NinjaTrader does not need to be running, connected, or asked to download
+anything, and the replay path is a sequential file read into the same ring the live server
+drains rather than a trip through NinjaTrader's data layer.
+
+Ingestion is the only step that ever touches NT8, and it is a one-time cost per session. Two
+ways in: the AddOn's `recordTo` writes the store format directly while a session plays (live or
+Market Replay), and the importer converts exports or third-party files offline. The store keeps a
+provenance line per session (source, capture time, whether depth is present, AddOn and schema
+versions) so a report can say exactly what it ran on. Storage cost is the user's disk; a full ES
+session with depth at tick resolution runs to hundreds of megabytes, and the store says so in
+its listing.
+
+This is also where the speed comes from. The Strategy Analyzer replays through the whole
+platform -- bar building, indicator recalculation, chart state -- for every run. The store feeds
+a fixed-layout stream straight into the calculators, so run time is bounded by disk read and
+calculator throughput, which is the number the harness publishes.
 
 ## Cost model
 
