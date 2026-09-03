@@ -479,9 +479,12 @@ hand-computed values):
   0.50. An empty level between two peaks is therefore an LVN of strength 1.
 - The strongest `maxNodes` (default 16) survive, lower price first on equal strength, and are
   listed by price.
-- Session boundaries come from the instrument's trading-hours template
-  (`TradingHours.GetNextBeginEnd`) compared with each event's own time stamp, never from a
-  hardcoded clock. At the boundary the session profile is promoted to `prior` when the AddOn saw
+- Session boundaries come from the instrument's trading-hours template, read through a
+  `SessionIterator` (NT8 8.1.8.2 has no `TradingHours.GetNextBeginEnd`), compared with each
+  event's own time stamp, never from a hardcoded clock. The iterator needs a `Bars`, so each
+  instrument issues one coarse bootstrap `BarsRequest` over a fixed lookback (AddOn config
+  `sessionBootstrapDays`, default 5) that itself needs no session knowledge; until it returns,
+  `sessionKnown` is 0 and nothing is requested. At the boundary the session profile is promoted to `prior` when the AddOn saw
   the whole session (history loaded, or the tape started within a minute of the open) and is
   otherwise re-fetched as bars; `composite` is rebuilt as prior plus the new session and then
   grows with every print.

@@ -7,9 +7,14 @@
 // ring. The BarsRequest callback runs on a NinjaTrader thread and only hands over arrays through
 // HistoryRequest; the fold happens here. Nothing in this file runs on a data thread.
 //
-// Session boundaries come from the instrument's trading-hours template (SessionHistory), in
-// NinjaTrader's local-time convention, and are compared with each event's own time stamp. UTC
-// values for the wire are converted once per transition, never per event or per frame.
+// Session boundaries come from this state's own SessionCalendar (SessionHistory.cs), in
+// NinjaTrader's local-time convention, and are compared with each event's own time stamp. The
+// calendar owns one bootstrap BarsRequest for this instrument and the SessionIterator built on
+// it; because a roll builds a new MarketState, it also builds a new calendar, and no session
+// knowledge crosses a contract. Until that request returns, the calendar answers "not known"
+// and every session question is simply retried on the next per-second pass - nothing here ever
+// blocks or waits on it. UTC values for the wire are converted once per transition, never per
+// event or per frame.
 //
 // Steady state allocates nothing: every array is sized at construction, history requests are
 // one-off per session, and the serializer writes into the publisher's buffer.
@@ -53,6 +58,10 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         public readonly PriceState Price;
         public readonly VwapCalculator Vwap;
 
+        // Session boundaries for this instrument. Publisher thread only (its own bootstrap
+        // callback aside, which the calendar keeps to itself).
+        private readonly SessionCalendar _calendar;
+
         private SessionVolumeProfile _session;
         private SessionVolumeProfile _prior;
         private readonly SessionVolumeProfile _composite;
@@ -89,6 +98,10 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             _config = config;
             _tickSize = identity != null ? identity.TickSize : 0.0;
             double pointValue = identity != null ? identity.PointValue : 0.0;
+
+            // Constructed only; the request itself is issued from the publisher thread on the
+            // first per-second pass that asks for a session.
+            _calendar = new SessionCalendar(_instrument, config != null ? config.SessionBootstrapDays : 5);
 
             Price = new PriceState(_tickSize, pointValue);
             Vwap = new VwapCalculator(_tickSize);
@@ -183,8 +196,15 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         {
             DateTime begin;
             DateTime end;
-            if (!SessionHistory.SessionBounds(_instrument, now, out begin, out end))
-                return;                                 // template not usable yet; try again next second
+            if (!_calendar.SessionBounds(now, out begin, out end))
+            {
+                // Bootstrap still in flight, or the calendar cannot answer at all. Either way
+                // the session stays unknown and this is retried next second; the reason, if
+                // there is one, goes out on the error and coverage fields.
+                NoteSessionReason();
+                return;
+            }
+            _historyError = "";
 
             SetSession(begin.Ticks, end.Ticks, now.Ticks);
 
@@ -205,8 +225,21 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
 
             DateTime pb;
             DateTime pe;
-            if (SessionHistory.PriorSessionBounds(_instrument, begin, out pb, out pe))
+            if (_calendar.PriorSessionBounds(begin, out pb, out pe))
                 _priorHistory = SessionHistory.Request(_instrument, pb, pe, false);
+        }
+
+        // The calendar's reason for "session unknown", if it has one, onto the fields that
+        // already carry failures: LastError (the publisher dedupes by reference and reports it
+        // once) and coverage.historyError while nothing has been requested. Never throws.
+        private void NoteSessionReason()
+        {
+            string reason = _calendar.Error;
+            if (reason == null)
+                return;
+            _lastError = reason;
+            if (_historyState == HistoryState.NotRequested)
+                _historyError = reason;
         }
 
         // Checkpoints that fell before nowLocal (the AddOn attached mid-session) cannot be known
@@ -274,12 +307,13 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
 
             DateTime begin;
             DateTime end;
-            if (SessionHistory.SessionBounds(_instrument, new DateTime(atLocalTicks), out begin, out end))
+            if (_calendar.SessionBounds(new DateTime(atLocalTicks), out begin, out end))
             {
                 SetSession(begin.Ticks, end.Ticks, atLocalTicks);
             }
             else
             {
+                NoteSessionReason();
                 _sessionKnown = false;                  // re-probed on the next Tick
                 _inSession = false;
                 _nextCheckpointLocal = 0;
@@ -426,6 +460,21 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             catch (Exception)
             {
                 return 0;
+            }
+        }
+
+        // Called from InstrumentFeed.Dispose (publisher thread) when this state is retired at a
+        // roll or at shutdown: releases the calendar's bootstrap BarsRequest. Never throws.
+        public void Dispose()
+        {
+            try
+            {
+                if (_calendar != null)
+                    _calendar.Dispose();
+            }
+            catch (Exception ex)
+            {
+                _lastError = ex.GetType().Name + ": " + ex.Message;
             }
         }
 

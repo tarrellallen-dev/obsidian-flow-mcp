@@ -47,11 +47,18 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         //   (1-minute bars, volume spread over the bar's range), "tick" (1-tick bars) or "none"
         //   (no BarsRequest; the profile starts at attach). checkpointMinutes: developing
         //   POC/VAH/VAL are frozen at this interval from the session open.
+        // sessionBootstrapDays: lookback, in days, of the one-off coarse BarsRequest each
+        //   instrument issues so a SessionIterator can be built from its Bars (NT8 has no way to
+        //   ask a trading-hours template for a session directly). It only has to be long enough
+        //   to return a series - the iterator answers about sessions the bars never covered - so
+        //   the default is small; raise it only for an instrument so thin that a few days hold
+        //   no data at all. Clamped to 1..30.
         public int ProfileLevels;
         public int HistogramLevels;
         public int MaxNodes;
         public string HistoryBars;
         public int CheckpointMinutes;
+        public int SessionBootstrapDays;
 
         // Null unless the file declared an "execution" object; never written by default.
         public ExecutionConfig Execution;
@@ -68,6 +75,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             MaxNodes = 16;
             HistoryBars = "minute";
             CheckpointMinutes = 30;
+            SessionBootstrapDays = 5;
             Execution = null;
         }
 
@@ -163,6 +171,10 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                 CheckpointMinutes = 1;
             if (CheckpointMinutes > 1440)
                 CheckpointMinutes = 1440;
+            if (SessionBootstrapDays < 1)
+                SessionBootstrapDays = 1;
+            if (SessionBootstrapDays > 30)
+                SessionBootstrapDays = 30;
             if (HistoryBars == null)
                 HistoryBars = "minute";
             string mode = HistoryBars.Trim().ToLowerInvariant();
@@ -232,6 +244,9 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             sb.Append(",\r\n");
             sb.Append("  \"checkpointMinutes\": ");
             sb.Append(c.CheckpointMinutes.ToString(CultureInfo.InvariantCulture));
+            sb.Append(",\r\n");
+            sb.Append("  \"sessionBootstrapDays\": ");
+            sb.Append(c.SessionBootstrapDays.ToString(CultureInfo.InvariantCulture));
 
             if (!string.IsNullOrEmpty(c.DumpTo))
             {
@@ -357,6 +372,8 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             }
             if (map.TryGetValue("checkpointMinutes", out value))
                 c.CheckpointMinutes = ToInt(value, c.CheckpointMinutes);
+            if (map.TryGetValue("sessionBootstrapDays", out value))
+                c.SessionBootstrapDays = ToInt(value, c.SessionBootstrapDays);
 
             if (map.TryGetValue("execution", out value))
             {

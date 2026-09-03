@@ -331,6 +331,17 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                 _marketDepth = null;
             }
 
+            // The market state holds one bootstrap BarsRequest for its session calendar; at a
+            // roll this feed is replaced and that request has no further reader.
+            try
+            {
+                if (_state != null)
+                    _state.Dispose();
+            }
+            catch (Exception)
+            {
+            }
+
             _instrument = null;
         }
     }
