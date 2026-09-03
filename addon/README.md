@@ -38,7 +38,7 @@ if it does not exist:
   "instruments": [ "ES 06-26" ],
   "pushRateHz": 100,
   "ringCapacity": 65536,
-  "pipeName": "obsidianflow-orderflow-v1"
+  "pipeName": "obsidian-flow-mcp-v1"
 }
 ```
 

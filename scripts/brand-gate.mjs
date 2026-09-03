@@ -15,6 +15,8 @@ const SURFACES = [
   ["addon/StatusWindow.cs", /Caption\s*=\s*"([^"]*)"/, "status window caption"],
   ["server/src/index.ts", /SERVER_NAME\s*=\s*"([^"]*)"/, "MCP server name"],
   ["server/package.json", /"name"\s*:\s*"([^"]*)"/, "npm package name"],
+  ["server/package.json", /"bin"\s*:\s*{\s*"([^"]*)"/, "CLI bin name"],
+  ["addon/Config.cs", /PipeName\s*=\s*"([^"]*)"/, "named pipe"],
   ["README.md", /^#\s*(.*)$/m, "README title"],
 ];
 

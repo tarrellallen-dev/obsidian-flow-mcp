@@ -49,7 +49,7 @@ docs/     decisions/ (ADRs) and the latency methodology
 ## How the pieces fit
 
 The AddOn runs inside NinjaTrader and owns one publisher thread. The server runs as a separate
-Node process and connects to `\\.\pipe\obsidianflow-orderflow-v1`. Frames flow one way, from the
+Node process and connects to `\\.\pipe\obsidian-flow-mcp-v1`. Frames flow one way, from the
 AddOn to the server. The server keeps the last frame per instrument in memory; MCP tools read
 that cache and never wait on I/O.
 
@@ -78,6 +78,9 @@ NinjaScript Editor, then open **New > Obsidian Flow MCP** in the Control Center 
 window. The AddOn cannot be compiled outside NinjaTrader.
 
 ### Server
+
+First time on Windows, follow `docs/windows-setup.md` (installing Node, building, pointing an
+MCP client at it). Short version:
 
 ```
 cd server

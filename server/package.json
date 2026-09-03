@@ -10,7 +10,7 @@
     "node": ">=20"
   },
   "bin": {
-    "nt8-orderflow-mcp": "./dist/src/index.js"
+    "obsidian-flow-mcp": "./dist/src/index.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

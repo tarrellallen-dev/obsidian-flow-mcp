@@ -48,7 +48,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             Instruments = new List<string>();
             PushRateHz = 100;
             RingCapacity = 65536;
-            PipeName = "obsidianflow-orderflow-v1";
+            PipeName = "obsidian-flow-mcp-v1";
             DumpTo = null;
             Execution = null;
         }
@@ -123,7 +123,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             RingCapacity = RoundUpToPowerOfTwo(RingCapacity);
 
             if (string.IsNullOrEmpty(PipeName))
-                PipeName = "obsidianflow-orderflow-v1";
+                PipeName = "obsidian-flow-mcp-v1";
         }
 
         private static int RoundUpToPowerOfTwo(int value)

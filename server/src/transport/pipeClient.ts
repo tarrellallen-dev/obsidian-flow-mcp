@@ -44,7 +44,7 @@ const DEFAULT_MAX_BACKOFF_MS = 5_000;
 export function resolveEndpoint(options: PipeClientOptions): string {
   const platform = options.platform ?? process.platform;
   if (platform === "win32") {
-    const name = options.pipeName ?? "obsidianflow-orderflow-v1";
+    const name = options.pipeName ?? "obsidian-flow-mcp-v1";
     return `\\\\.\\pipe\\${name}`;
   }
   const socketPath = options.socketPath ?? process.env.OF_SOCKET_PATH;

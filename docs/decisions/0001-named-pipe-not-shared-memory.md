@@ -12,7 +12,7 @@ carrying length-prefixed binary frames, or a shared-memory ring with a seqlock.
 
 ## Decision
 
-v1 uses a named pipe (`\\.\pipe\obsidianflow-orderflow-v1`) carrying fixed-layout,
+v1 uses a named pipe (`\\.\pipe\obsidian-flow-mcp-v1`) carrying fixed-layout,
 length-prefixed, little-endian binary frames. Off Windows the same frames run over a Unix domain
 socket, used for tests and CI only.
 

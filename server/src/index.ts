@@ -192,7 +192,7 @@ export function buildServer(cache: StateCache, config: ServerConfig = loadServer
 
 async function main(): Promise<void> {
   const options: PipeClientOptions = {
-    pipeName: process.env.OF_PIPE_NAME ?? "obsidianflow-orderflow-v1",
+    pipeName: process.env.OF_PIPE_NAME ?? "obsidian-flow-mcp-v1",
   };
   const socketPath = process.env.OF_SOCKET_PATH;
   if (socketPath) options.socketPath = socketPath;

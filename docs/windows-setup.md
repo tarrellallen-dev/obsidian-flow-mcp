@@ -1,0 +1,100 @@
+# Running the Obsidian Flow MCP server on Windows
+
+The AddOn runs inside NinjaTrader. The server is a small Node process that reads the AddOn's
+named pipe and answers an MCP client. Both live on the same Windows machine; the pipe is
+local-only and is never exposed to a network.
+
+Do these once, in order.
+
+## 1. Install Node
+
+Node 20 or newer. In PowerShell:
+
+```powershell
+winget install OpenJS.NodeJS.LTS
+```
+
+If `winget` is unavailable, download the LTS **Windows Installer (.msi)** from nodejs.org and
+run it with the default options.
+
+Close PowerShell and open a new one (the installer edits PATH; an old window will not see it),
+then confirm:
+
+```powershell
+node -v
+npm -v
+```
+
+`node -v` must print v20 or higher.
+
+## 2. Build the server
+
+```powershell
+cd "$env:USERPROFILE\Documents\nt8-the-boy-prodigy-orderflow-mcp\server"
+npm install
+npm run typecheck
+npm test
+npm run build
+```
+
+`npm install` reaches the public npm registry and takes a minute the first time. `npm test`
+should report all tests passing; it runs entirely offline against a local socket and does not
+need NinjaTrader.
+
+## 3. Check the pipe exists
+
+Start NinjaTrader, connect a data feed, and open **New > Obsidian Flow MCP** from the Control
+Center. The AddOn creates its pipe when the engine starts. In PowerShell:
+
+```powershell
+[System.IO.Directory]::GetFiles("\\.\pipe\") | Select-String "obsidian"
+```
+
+A line ending in `obsidian-flow-mcp-v1` means the AddOn is listening. Nothing printed means the
+AddOn is not running, or is running under a different pipe name - check `pipeName` in
+`Documents\NinjaTrader 8\ObsidianFlow.OrderFlowMcp.json` and the status window.
+
+The `instruments` list in that file must name instruments the connected feed actually provides,
+including the correct contract month. An expired contract produces a connected pipe with no
+market data, which the status window shows as zero events drained.
+
+## 4. Point an MCP client at it
+
+For your MCP client, edit its MCP server configuration file:
+
+```json
+{
+  "mcpServers": {
+    "obsidian-flow-mcp": {
+      "command": "node",
+      "args": [
+        "C:\\Users\\<you>\\Documents\\nt8-the-boy-prodigy-orderflow-mcp\\server\\dist\\src\\index.js"
+      ]
+    }
+  }
+}
+```
+
+Use the real path, with doubled backslashes, and restart the app. The server appears under the
+name `obsidian-flow-mcp`. Any MCP client that can launch a stdio server works the same way; the
+command is `node <path to dist/src/index.js>`.
+
+The server starts even when NinjaTrader is closed: it reports the link as down and keeps
+retrying, so the client never has to be restarted because the platform was.
+
+## 5. First calls
+
+- `health` - link state, staleness, dropped events, and the AddOn's push rate.
+- `instruments` - what the AddOn announced, with tick size and session template.
+- `latency_report` - the AddOn's own in-process handler measurements and the environment block.
+
+If `health` reports the link down while step 3 showed the pipe, the pipe name in the server's
+environment (`OF_PIPE_NAME`) and in the AddOn config disagree.
+
+## Notes
+
+- Only one server instance at a time: the AddOn accepts a single pipe client, and a second one
+  waits.
+- Nothing here needs administrator rights, and the pipe is not reachable from another machine.
+- On Linux and macOS the server runs against a Unix socket (`OF_SOCKET_PATH`) for tests and CI
+  only. There is no NinjaTrader there, so there is no live data.
