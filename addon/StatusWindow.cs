@@ -6,6 +6,8 @@
 // .NET Framework 4.8. ASCII only.
 
 using System;
+using System.Globalization;
+using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
@@ -27,6 +29,9 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         private readonly TextBlock _allocDelta;
         private readonly TextBlock _dataThreadAlloc;
         private readonly TextBlock _handlerSamples;
+        private readonly TextBlock _handlers;
+        private readonly TextBlock _serialize;
+        private readonly TextBlock _dump;
         private readonly TextBlock _messages;
 
         private readonly DispatcherTimer _timer;
@@ -34,8 +39,8 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         public StatusWindow()
         {
             Caption = "Order-Flow MCP";
-            Width = 460;
-            Height = 320;
+            Width = 720;
+            Height = 460;
 
             Grid grid = new Grid();
             grid.Margin = new Thickness(12);
@@ -50,8 +55,14 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             _drops = AddRow(grid, ref row, "Drops");
             _framesSent = AddRow(grid, ref row, "Frames sent");
             _allocDelta = AddRow(grid, ref row, "Publisher alloc delta");
-            _dataThreadAlloc = AddRow(grid, ref row, "Data-thread alloc delta");
+            _dataThreadAlloc = AddRow(grid, ref row, "Data thread alloc (thread-wide)");
+            _dataThreadAlloc.TextWrapping = TextWrapping.Wrap;
             _handlerSamples = AddRow(grid, ref row, "Handler samples");
+            _handlers = AddRow(grid, ref row, "Handlers (us)");
+            _handlers.TextWrapping = TextWrapping.Wrap;
+            _handlers.FontFamily = new System.Windows.Media.FontFamily("Consolas");
+            _serialize = AddRow(grid, ref row, "Publisher serialize");
+            _dump = AddRow(grid, ref row, "CSV dump");
             _messages = AddRow(grid, ref row, "Startup");
             _messages.TextWrapping = TextWrapping.Wrap;
 
@@ -108,15 +119,15 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
 
                 if (!AllocationProbe.IsAvailable)
                 {
-                    _dataThreadAlloc.Text = "unavailable on this runtime";
+                    _dataThreadAlloc.Text = AllocationProbe.UnavailableLabel + " on this runtime";
                 }
                 else
                 {
-                    long dataThreadBytes = 0;
-                    for (int i = 0; i < feeds.Length; i++)
-                        dataThreadBytes += feeds[i].DataThreadAllocDelta + feeds[i].DepthThreadAllocDelta;
-                    _dataThreadAlloc.Text = dataThreadBytes.ToString() + " bytes (sampled every "
-                        + InstrumentFeed.AllocSampleInterval.ToString() + " events)";
+                    // GC.GetAllocatedBytesForCurrentThread is thread-wide. Several feeds whose
+                    // handlers NT raises on one thread read the same counter, so the figure is
+                    // listed once per distinct ManagedThreadId, not once per feed, and it
+                    // includes everything NT itself allocates on that thread.
+                    _dataThreadAlloc.Text = DescribeThreadAllocations(feeds);
                 }
 
                 if (publisher == null)
@@ -128,6 +139,9 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                     _framesSent.Text = "-";
                     _allocDelta.Text = "-";
                     _handlerSamples.Text = "-";
+                    _handlers.Text = "-";
+                    _serialize.Text = "-";
+                    _dump.Text = "-";
                 }
                 else
                 {
@@ -146,6 +160,38 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                         ? publisher.AllocDelta.ToString() + " bytes"
                         : "unavailable on this runtime";
                     _handlerSamples.Text = publisher.HandlerSamples.ToString();
+
+                    // Per instrument, per handler: p50/p99/p99.9 in microseconds, bytes allocated
+                    // over the last 1024 events, ring drops. Every figure is a plain volatile
+                    // read of a field the publisher thread wrote at most one second ago.
+                    StringBuilder sb = new StringBuilder(256);
+                    int n = publisher.FeedCount;
+                    for (int i = 0; i < n; i++)
+                    {
+                        if (i > 0)
+                            sb.Append(Environment.NewLine);
+                        sb.Append(publisher.FeedName(i));
+                        sb.Append(Environment.NewLine).Append("  data  ");
+                        AppendSummary(sb, publisher.DataSummary(i));
+                        sb.Append(Environment.NewLine).Append("  depth ");
+                        AppendSummary(sb, publisher.DepthSummary(i));
+                    }
+                    _handlers.Text = n == 0 ? "-" : sb.ToString();
+
+                    LatencySummary ser = publisher.SerializeSummary;
+                    _serialize.Text = "p99 " + FormatUs(ser.P99Ns) + " us  (p50 " + FormatUs(ser.P50Ns)
+                        + " us, max " + FormatUs(ser.MaxNs) + " us, n=" + ser.Count.ToString() + ")";
+
+                    string dumpPath = publisher.DumpPath;
+                    if (string.IsNullOrEmpty(dumpPath))
+                        _dump.Text = "off (set dumpTo in the config file)";
+                    else
+                    {
+                        string dumpError = publisher.DumpError;
+                        _dump.Text = string.IsNullOrEmpty(dumpError)
+                            ? dumpPath + " (every 10 s)"
+                            : dumpPath + " (stopped: " + dumpError + ")";
+                    }
                 }
 
                 string[] messages = engine.StartupMessages;
@@ -155,6 +201,96 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             {
                 _connection.Text = "status error: " + ex.Message;
             }
+        }
+
+        // "p50/p99/p99.9 12.3/45.6/78.9 us  alloc/1024 0 B  drops 0  n=123456"
+        private static void AppendSummary(StringBuilder sb, LatencySummary sm)
+        {
+            sb.Append("p50/p99/p99.9 ");
+            sb.Append(FormatUs(sm.P50Ns)).Append('/');
+            sb.Append(FormatUs(sm.P99Ns)).Append('/');
+            sb.Append(FormatUs(sm.P999Ns)).Append(" us");
+            sb.Append("  alloc/1024 ");
+            long alloc = sm.AllocBytesPer1024;
+            if (alloc < 0)
+                sb.Append(AllocationProbe.UnavailableLabel);
+            else
+                sb.Append(alloc.ToString()).Append(" B");
+            sb.Append("  drops ").Append(sm.Drops.ToString());
+            sb.Append("  n=").Append(sm.Count.ToString());
+            if (sm.SampleOverruns > 0)
+                sb.Append("  overrun ").Append(sm.SampleOverruns.ToString());
+        }
+
+        // "--" for a negative value: the histogram is empty and there is no figure.
+        private static string FormatUs(long ns)
+        {
+            if (ns < 0)
+                return "--";
+            return (ns / 1000.0).ToString("0.0", CultureInfo.InvariantCulture);
+        }
+
+        // One entry per distinct handler thread: "thread 12: 4096 B (ES 06-26 data, NQ 06-26 data)".
+        // Feeds whose probe has not run yet are listed as "no probe yet". At most a handful of
+        // threads exist, so the nested scan is fine at 2 Hz on the UI thread.
+        private static string DescribeThreadAllocations(InstrumentFeed[] feeds)
+        {
+            StringBuilder sb = new StringBuilder(128);
+            int[] seen = new int[feeds.Length * 2];
+            int seenCount = 0;
+            int pending = 0;
+
+            for (int i = 0; i < feeds.Length; i++)
+            {
+                for (int k = 0; k < 2; k++)
+                {
+                    int tid = k == 0 ? feeds[i].DataAllocThreadId : feeds[i].DepthAllocThreadId;
+                    long total = k == 0 ? feeds[i].DataThreadAllocDelta : feeds[i].DepthThreadAllocDelta;
+                    if (tid < 0 || total < 0)
+                    {
+                        pending++;
+                        continue;
+                    }
+
+                    bool dup = false;
+                    for (int j = 0; j < seenCount; j++)
+                    {
+                        if (seen[j] == tid) { dup = true; break; }
+                    }
+                    if (dup)
+                        continue;
+                    seen[seenCount++] = tid;
+
+                    if (sb.Length > 0)
+                        sb.Append(Environment.NewLine);
+                    sb.Append("thread ").Append(tid.ToString()).Append(": ").Append(total.ToString()).Append(" B (");
+                    bool first = true;
+                    for (int m = 0; m < feeds.Length; m++)
+                    {
+                        if (feeds[m].DataAllocThreadId == tid)
+                        {
+                            if (!first) sb.Append(", ");
+                            sb.Append(feeds[m].InstrumentName).Append(" data");
+                            first = false;
+                        }
+                        if (feeds[m].DepthAllocThreadId == tid)
+                        {
+                            if (!first) sb.Append(", ");
+                            sb.Append(feeds[m].InstrumentName).Append(" depth");
+                            first = false;
+                        }
+                    }
+                    sb.Append(")");
+                }
+            }
+
+            if (sb.Length == 0)
+                return "no probe yet (first probe runs on the first event)";
+            if (pending > 0)
+                sb.Append(Environment.NewLine).Append(pending.ToString()).Append(" handler(s) not probed yet");
+            sb.Append(Environment.NewLine).Append("thread-wide counter, includes NinjaTrader's own allocations on that thread; sampled every ")
+              .Append(InstrumentFeed.AllocSampleInterval.ToString()).Append(" events");
+            return sb.ToString();
         }
 
         private void OnClosed(object sender, EventArgs e)

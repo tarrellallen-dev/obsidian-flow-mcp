@@ -18,7 +18,12 @@ offset  size  type   field
                                    16 exec request, 17 exec reply
 6       2     u16    version       schema version, currently 1
 8       4     u32    sequence      per-connection, monotonic, starts at 0, wraps at 2^32
-12      4     u32    dropped       snapshots dropped since the last frame (conflation counter)
+12      4     u32    ringEventsDropped  market events the AddOn's rings dropped (ring full,
+                                   drop-newest) since the last frame; NOT a count of dropped
+                                   snapshots. Snapshots are conflated, never queued, so no
+                                   snapshot is ever "dropped": the newest state simply replaces
+                                   the previous one. Spec 3.3 calls this field "dropped"; the
+                                   value it has always carried is the ring drop sum.
 16      8     i64    sentTicks     Stopwatch ticks at serialize time (staleness reference)
 24      8     i64    wallUtc       DateTime.UtcNow ticks
 32      2     u16    instrument    index into the hello frame's instrument table,
@@ -43,9 +48,9 @@ any publisher-to-client figure is an estimate, labelled as one (see "Staleness" 
 is a protocol violation, not a large frame: the client drops the connection and reconnects. The
 publisher treats the same condition as a bug and throws rather than truncating.
 
-## Frame types in build step 1
+## Frame types in build steps 1 and 2
 
-Step 1 emits types 3, 4 and 1 only. Types 2, 16 and 17 are reserved here and defined in a later
+Steps 1 and 2 emit types 3, 4 and 1 only. Types 2, 16 and 17 are reserved here and defined in a later
 revision of this document.
 
 ### type 3 - hello
@@ -101,27 +106,94 @@ Empty payload (`length == 32`). `instrument` is `0xFFFF`. Sent every 1000 ms whi
 connected. A client that has seen no frame of any type for several heartbeat intervals should
 treat the connection as dead and reconnect.
 
-### type 1 - snapshot (step 1 payload)
+### type 1 - snapshot
 
 `instrument` is the instrument's index from the hello table. One snapshot per instrument per
 push interval (`pushRateHz`, default 100).
+
+The payload has grown additively: build step 1 defined the first 24 bytes, build step 2 appends
+136 bytes of instrumentation after them without moving anything. The schema version stays 1.
+A decoder accepts **either** size and reports the step-2 block as absent when the payload is
+24 bytes long; any other size is a protocol violation.
+
+#### step-1 block (offsets +0 .. +23)
 
 ```
 offset  size  type   field
 +0      8     u64    eventsDrained                 events drained from all rings since AddOn start
 +8      8     u64    bytesAllocatedOnPublisher     GC.GetAllocatedBytesForCurrentThread delta on
                                                    the publisher thread since its first frame
+                                                   (0 when the counter is unavailable; kept for
+                                                   step-1 compatibility, superseded by +104)
 +16     8     u64    handlerSamples                handler duration samples recorded for this
-                                                   instrument since AddOn start
+                                                   instrument since AddOn start (data + depth)
 ```
 
-Payload is 24 bytes; `length` is 56; total frame is 60 bytes.
+#### step-2 block (offsets +24 .. +159)
 
-`bytesAllocatedOnPublisher` is 0 when the host runtime does not expose
-`GC.GetAllocatedBytesForCurrentThread`. This is a counter read only; no GC setting is changed
-anywhere (see `docs/decisions/0002-no-gc-tampering.md`).
+All latency figures are **nanoseconds**, measured by the AddOn on its own threads with
+`Stopwatch` and quantised by a log-linear histogram to two significant digits (highest value
+of the bucket; `max` fields are exact). They are the AddOn's own in-process measurements of
+its handlers and its serializer, not end-to-end figures. Percentiles are recomputed at most
+once per second on the publisher thread, so consecutive snapshots within the same second carry
+identical values.
 
-Step 1 computes no market state. This payload grows in later steps; the header does not.
+`u32` nanosecond fields reserve **0xFFFFFFFF (4294967295) for "unavailable"**: the histogram
+behind the figure is empty (no events yet on that handler, no frames yet for the serializer).
+A decoder reports it as null, never as 0 ns. Measured values saturate at 4294967294.
+
+Allocation figures are `i64` and use **-1 to mean "not measured"**: the host runtime does not
+expose `GC.GetAllocatedBytesForCurrentThread`, or the probe has not run on that thread yet
+(totals need one probe, per-1024 figures need two). A value of 0 always means "measured, zero
+bytes". Per-1024 figures are the bytes allocated over the most recent 1024 events on that
+handler's thread (the probe runs once per 1024 events); totals are since the thread's first
+probe. The counter is **thread-wide**: it counts every allocation on the thread NinjaTrader
+raises that handler on, including NinjaTrader's own, and two instruments whose handlers share
+a thread report the same number twice. It is a bound on the handler's allocation, not an
+attribution to it.
+
+```
+offset  size  type   field
++24     4     u32    dataP50Ns                     MarketData handler duration, p50
++28     4     u32    dataP99Ns                     ... p99
++32     4     u32    dataP999Ns                    ... p99.9
++36     4     u32    dataMaxNs                     ... max, exact
++40     8     u64    dataSampleCount               samples in the MarketData histogram
++48     4     u32    depthP50Ns                    MarketDepth handler duration, p50
++52     4     u32    depthP99Ns                    ... p99
++56     4     u32    depthP999Ns                   ... p99.9
++60     4     u32    depthMaxNs                    ... max, exact
++64     8     u64    depthSampleCount              samples in the MarketDepth histogram
++72     8     i64    dataAllocBytesPer1024         MarketData thread, bytes over the last 1024 events
++80     8     i64    dataAllocBytesTotal           MarketData thread, bytes since first probe
++88     8     i64    depthAllocBytesPer1024        MarketDepth thread, bytes over the last 1024 events
++96     8     i64    depthAllocBytesTotal          MarketDepth thread, bytes since first probe
++104    8     i64    publisherAllocBytesTotal      publisher thread, bytes since its first frame
++112    4     u32    serializeP50Ns                publisher frame-serialize time, p50
++116    4     u32    serializeP99Ns                ... p99
++120    4     u32    serializeP999Ns               ... p99.9
++124    4     u32    serializeMaxNs                ... max, exact
++128    8     u64    serializeSampleCount          frames timed (all instruments; one histogram)
++136    8     u64    stopwatchFrequency            publisher Stopwatch.Frequency, same value as
+                                                   in the hello frame, repeated so a snapshot
+                                                   can be interpreted on its own in a log
++144    8     u64    ringDropsTotal                events dropped by this instrument's two rings
+                                                   since AddOn start (producer-side, ring full)
++152    8     u64    sampleOverrunsTotal           handler duration samples the publisher failed
+                                                   to read before the sample ring overwrote
+                                                   them; nonzero means the histograms undercount
+```
+
+Step-1 payload is 24 bytes (`length` 56, frame 60). Step-2 payload is **160 bytes**
+(`length` 192, frame 196).
+
+The publisher serialize timer runs from the start of payload serialization to the moment the
+bytes are handed to the pipe; the pipe write itself is not inside it. The MarketData and
+MarketDepth timers run from handler entry to just after the ring push. Neither includes any
+NinjaTrader-side time before the handler is entered, the pipe transit, decoding on the
+server, or the MCP hop; those are not measured in build step 2.
+
+Step 2 computes no market state either. This payload grows in later steps; the header does not.
 
 ## Framing and reconnect
 
@@ -147,5 +219,8 @@ tested against them so a layout change cannot pass silently.
 | `hello.bin` | hello, 2 instruments |
 | `hello-empty.bin` | hello, 0 instruments |
 | `heartbeat.bin` | heartbeat, empty payload |
-| `snapshot.bin` | step-1 snapshot for instrument index 1 |
-| `stream.bin` | hello + heartbeat + 2 snapshots concatenated, for the splitter test |
+| `snapshot.bin` | step-1 snapshot (24-byte payload) for instrument index 1; still valid, still decoded |
+| `snapshot-step2.bin` | step-2 snapshot (160-byte payload) for instrument index 1 |
+| `snapshot-step2-unavailable.bin` | step-2 snapshot whose allocation fields are all -1 |
+| `stream.bin` | hello + heartbeat + 2 step-1 snapshots concatenated, for the splitter test |
+| `stream-step2.bin` | hello + heartbeat + step-2 snapshot + step-1 snapshot, mixed sizes |

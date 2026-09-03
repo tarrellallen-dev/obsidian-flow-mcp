@@ -1,8 +1,8 @@
 {
   "name": "nt8-orderflow-mcp-server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "MCP server exposing NinjaTrader 8 order-flow state. Build step 1: transport only.",
+  "description": "MCP server exposing NinjaTrader 8 order-flow state. Build step 2: transport and instrumentation.",
   "license": "Apache-2.0",
   "type": "module",
   "engines": {

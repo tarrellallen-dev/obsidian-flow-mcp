@@ -37,7 +37,7 @@ describe("wire v1 golden files", () => {
     expect(h.type).toBe(FrameType.Heartbeat);
     expect(h.version).toBe(SCHEMA_VERSION);
     expect(h.sequence).toBe(1);
-    expect(h.dropped).toBe(0);
+    expect(h.ringEventsDropped).toBe(0);
     expect(h.instrument).toBe(INSTRUMENT_NONE);
     expect(h.reserved).toBe(0);
   });
@@ -81,7 +81,7 @@ describe("wire v1 golden files", () => {
 
     const frame = decodeFrame(buf);
     expect(frame.header.instrument).toBe(1);
-    expect(frame.header.dropped).toBe(7);
+    expect(frame.header.ringEventsDropped).toBe(7);
     if (frame.payload.kind !== "snapshot") throw new Error("expected snapshot");
     expect(frame.payload.eventsDrained).toBe(123456789n);
     expect(frame.payload.bytesAllocatedOnPublisher).toBe(4096n);

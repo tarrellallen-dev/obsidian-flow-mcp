@@ -6,7 +6,12 @@
  * arrives, because instrument indices are valid only for the connection that announced them.
  */
 
-import type { Frame, HelloInstrument, SnapshotPayload } from "../wire/decoder.js";
+import type {
+  Frame,
+  HandlerLatency,
+  HelloInstrument,
+  SnapshotPayload,
+} from "../wire/decoder.js";
 import { FrameType } from "../wire/decoder.js";
 
 export type Freshness = "live" | "stale" | "reconnecting";
@@ -62,6 +67,54 @@ export interface InstrumentView {
   eventsDrained: string | null;
   bytesAllocatedOnPublisher: string | null;
   handlerSamples: string | null;
+}
+
+/** -1 on the wire means "not measured"; it is surfaced as the value plus a label, never as 0. */
+export interface AllocFigure {
+  bytes: number;
+  status: "measured" | "unavailable";
+}
+
+/** Latency fields are null when the AddOn's histogram was empty; never 0 for "no data". */
+export interface HandlerLatencyView {
+  p50Ns: number | null;
+  p99Ns: number | null;
+  p999Ns: number | null;
+  maxNs: number | null;
+  sampleCount: string;
+  allocBytesPer1024: AllocFigure;
+  allocBytesTotal: AllocFigure;
+}
+
+export interface SerializeLatencyView {
+  p50Ns: number | null;
+  p99Ns: number | null;
+  p999Ns: number | null;
+  maxNs: number | null;
+  sampleCount: string;
+}
+
+/**
+ * Per-instrument instrumentation as last reported by the AddOn (step-2 snapshot block).
+ * `instrumentation` is "absent" when the publisher is a step-1 build sending 24-byte snapshots,
+ * and "none" when no snapshot has arrived on this connection.
+ */
+export interface InstrumentLatencyView {
+  index: number;
+  name: string;
+  freshness: Freshness;
+  staleness: Staleness;
+  sequence: number;
+  instrumentation: "present" | "absent" | "none";
+  data: HandlerLatencyView | null;
+  depth: HandlerLatencyView | null;
+  publisherAllocBytesTotal: AllocFigure | null;
+  serialize: SerializeLatencyView | null;
+  stopwatchFrequency: string | null;
+  ringDropsTotal: string | null;
+  sampleOverrunsTotal: string | null;
+  /** Ring event drops from frame headers, summed on this connection (same as instruments tool). */
+  droppedTotal: number;
 }
 
 export interface CacheHealth {
@@ -217,7 +270,7 @@ export class StateCache {
       slot.receivedAtNs = receivedAtNs;
       slot.offsetNs = offsetNs;
       slot.sequence = frame.header.sequence;
-      slot.droppedTotal += frame.header.dropped;
+      slot.droppedTotal += frame.header.ringEventsDropped;
     }
   }
 
@@ -334,6 +387,48 @@ export class StateCache {
     };
   }
 
+  viewLatency(): InstrumentLatencyView[] {
+    return [...this.slots.values()]
+      .sort((a, b) => a.index - b.index)
+      .map((slot) => this.latencyOf(slot));
+  }
+
+  viewLatencyByName(name: string): InstrumentLatencyView | null {
+    for (const slot of this.slots.values()) {
+      if (slot.name === name) return this.latencyOf(slot);
+    }
+    return null;
+  }
+
+  private latencyOf(slot: InstrumentSlot): InstrumentLatencyView {
+    const snapshot = slot.snapshot;
+    const inst = snapshot?.instrumentation ?? null;
+    return {
+      index: slot.index,
+      name: slot.name,
+      freshness: this.freshnessFor(slot),
+      staleness: this.stalenessOf(slot.receivedAtNs, slot.offsetNs),
+      sequence: slot.sequence,
+      instrumentation: snapshot === null ? "none" : inst === null ? "absent" : "present",
+      data: inst ? handlerView(inst.data) : null,
+      depth: inst ? handlerView(inst.depth) : null,
+      publisherAllocBytesTotal: inst ? allocFigure(inst.publisherAllocBytesTotal) : null,
+      serialize: inst
+        ? {
+            p50Ns: inst.serialize.p50Ns,
+            p99Ns: inst.serialize.p99Ns,
+            p999Ns: inst.serialize.p999Ns,
+            maxNs: inst.serialize.maxNs,
+            sampleCount: inst.serialize.sampleCount.toString(),
+          }
+        : null,
+      stopwatchFrequency: inst ? inst.stopwatchFrequency.toString() : null,
+      ringDropsTotal: inst ? inst.ringDropsTotal.toString() : null,
+      sampleOverrunsTotal: inst ? inst.sampleOverrunsTotal.toString() : null,
+      droppedTotal: slot.droppedTotal,
+    };
+  }
+
   health(): CacheHealth {
     let droppedTotal = 0;
     let eventsDrained: bigint | null = null;
@@ -370,6 +465,24 @@ export class StateCache {
   recentEvents(limit = 32): CachedEvent[] {
     return this.events.slice(Math.max(0, this.events.length - limit));
   }
+}
+
+export function allocFigure(bytes: bigint): AllocFigure {
+  return bytes < 0n
+    ? { bytes: -1, status: "unavailable" }
+    : { bytes: Number(bytes), status: "measured" };
+}
+
+function handlerView(h: HandlerLatency): HandlerLatencyView {
+  return {
+    p50Ns: h.p50Ns,
+    p99Ns: h.p99Ns,
+    p999Ns: h.p999Ns,
+    maxNs: h.maxNs,
+    sampleCount: h.sampleCount.toString(),
+    allocBytesPer1024: allocFigure(h.allocBytesPer1024),
+    allocBytesTotal: allocFigure(h.allocBytesTotal),
+  };
 }
 
 function blankSlot(inst: HelloInstrument): InstrumentSlot {

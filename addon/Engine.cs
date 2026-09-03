@@ -4,6 +4,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 
 namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
 {
@@ -64,6 +65,13 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                     _startupMessages.Add("config: " + loadError);
                 else
                     _startupMessages.Add("config: " + path);
+
+                // AllocationProbe resolves GC.GetAllocatedBytesForCurrentThread by reflection in
+                // its static initializer. Left to lazy initialization, the first Read() would run
+                // that initializer (reflection, CreateDelegate, the type-init lock) on the NT data
+                // thread inside a handler. Force it here, on this thread, before any handler exists.
+                RuntimeHelpers.RunClassConstructor(typeof(AllocationProbe).TypeHandle);
+                RuntimeHelpers.RunClassConstructor(typeof(LatencyHistogram).TypeHandle);
 
                 int index = 0;
                 for (int i = 0; i < _config.Instruments.Count; i++)

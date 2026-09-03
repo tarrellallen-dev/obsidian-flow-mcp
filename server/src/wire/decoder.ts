@@ -37,7 +37,11 @@ export interface FrameHeader {
   type: number;
   version: number;
   sequence: number;
-  dropped: number;
+  /**
+   * Market events the AddOn's rings dropped (ring full) since the previous frame. Not dropped
+   * snapshots: snapshots are conflated, so none is ever dropped (schema/wire-v1.md, "Frame").
+   */
+  ringEventsDropped: number;
   sentTicks: bigint;
   wallUtc: bigint;
   instrument: number;
@@ -66,12 +70,66 @@ export interface HeartbeatPayload {
   kind: "heartbeat";
 }
 
-/** Build step 1 snapshot payload. Nothing about the market is computed yet. */
+/**
+ * One handler's latency summary from the step-2 snapshot block. Nanoseconds, quantised to two
+ * significant digits by the AddOn's log-linear histogram (highest value of the bucket); `maxNs`
+ * is exact. A latency field is null when the wire carries the 0xFFFFFFFF "unavailable"
+ * sentinel (empty histogram); it is never reported as 0. Allocation figures are -1n when not
+ * measured (runtime lacks the counter, or the probe has not run yet); 0n always means measured
+ * zero bytes. The allocation counter is thread-wide, see schema/wire-v1.md.
+ */
+export interface HandlerLatency {
+  p50Ns: number | null;
+  p99Ns: number | null;
+  p999Ns: number | null;
+  maxNs: number | null;
+  sampleCount: bigint;
+  allocBytesPer1024: bigint;
+  allocBytesTotal: bigint;
+}
+
+/** Publisher frame-serialize timing; one histogram across all instruments. */
+export interface SerializeLatency {
+  p50Ns: number | null;
+  p99Ns: number | null;
+  p999Ns: number | null;
+  maxNs: number | null;
+  sampleCount: bigint;
+}
+
+/** u32 nanosecond sentinel meaning "no figure" (schema/wire-v1.md, step-2 block). */
+export const NS_UNAVAILABLE = 0xffffffff;
+
+/** Largest measured value a u32 nanosecond field can carry; the AddOn saturates here. */
+export const NS_SATURATED = 0xfffffffe;
+
+function readNs(payload: Buffer, at: number): number | null {
+  const v = payload.readUInt32LE(at);
+  return v === NS_UNAVAILABLE ? null : v;
+}
+
+/** Build step 2 instrumentation block, schema/wire-v1.md "step-2 block", offsets +24..+159. */
+export interface SnapshotInstrumentation {
+  data: HandlerLatency;
+  depth: HandlerLatency;
+  publisherAllocBytesTotal: bigint;
+  serialize: SerializeLatency;
+  stopwatchFrequency: bigint;
+  ringDropsTotal: bigint;
+  sampleOverrunsTotal: bigint;
+}
+
+/**
+ * Snapshot payload. The step-1 block is always present; `instrumentation` is null when the
+ * publisher sent the 24-byte step-1 payload and present when it sent the 160-byte step-2 one.
+ * Nothing about the market is computed yet.
+ */
 export interface SnapshotPayload {
   kind: "snapshot";
   eventsDrained: bigint;
   bytesAllocatedOnPublisher: bigint;
   handlerSamples: bigint;
+  instrumentation: SnapshotInstrumentation | null;
 }
 
 export interface UnknownPayload {
@@ -109,7 +167,7 @@ export function decodeHeader(buf: Buffer): FrameHeader {
     type: buf.readUInt16LE(4),
     version: buf.readUInt16LE(6),
     sequence: buf.readUInt32LE(8),
-    dropped: buf.readUInt32LE(12),
+    ringEventsDropped: buf.readUInt32LE(12),
     sentTicks: buf.readBigInt64LE(16),
     wallUtc: buf.readBigInt64LE(24),
     instrument: buf.readUInt16LE(32),
@@ -197,10 +255,13 @@ function decodeHello(payload: Buffer): HelloPayload {
 /** Step-1 snapshot payload: 24 bytes, three u64 counters. */
 export const SNAPSHOT_PAYLOAD_BYTES = 24;
 
+/** Step-2 snapshot payload: the step-1 block plus 136 bytes of instrumentation. */
+export const SNAPSHOT_STEP2_PAYLOAD_BYTES = 160;
+
 function decodeSnapshot(payload: Buffer): SnapshotPayload {
-  if (payload.length !== SNAPSHOT_PAYLOAD_BYTES) {
+  if (payload.length !== SNAPSHOT_PAYLOAD_BYTES && payload.length !== SNAPSHOT_STEP2_PAYLOAD_BYTES) {
     throw new WireError(
-      `snapshot payload must be ${SNAPSHOT_PAYLOAD_BYTES} bytes, got ${payload.length}`,
+      `snapshot payload must be ${SNAPSHOT_PAYLOAD_BYTES} or ${SNAPSHOT_STEP2_PAYLOAD_BYTES} bytes, got ${payload.length}`,
     );
   }
   return {
@@ -208,5 +269,41 @@ function decodeSnapshot(payload: Buffer): SnapshotPayload {
     eventsDrained: payload.readBigUInt64LE(0),
     bytesAllocatedOnPublisher: payload.readBigUInt64LE(8),
     handlerSamples: payload.readBigUInt64LE(16),
+    instrumentation:
+      payload.length === SNAPSHOT_STEP2_PAYLOAD_BYTES ? decodeInstrumentation(payload) : null,
+  };
+}
+
+function decodeHandlerLatency(payload: Buffer, at: number, allocAt: number): HandlerLatency {
+  return {
+    p50Ns: readNs(payload, at),
+    p99Ns: readNs(payload, at + 4),
+    p999Ns: readNs(payload, at + 8),
+    maxNs: readNs(payload, at + 12),
+    sampleCount: payload.readBigUInt64LE(at + 16),
+    allocBytesPer1024: payload.readBigInt64LE(allocAt),
+    allocBytesTotal: payload.readBigInt64LE(allocAt + 8),
+  };
+}
+
+function decodeInstrumentation(payload: Buffer): SnapshotInstrumentation {
+  const stopwatchFrequency = payload.readBigUInt64LE(136);
+  if (stopwatchFrequency <= 0n) {
+    throw new WireError(`snapshot declares a non-positive stopwatchFrequency: ${stopwatchFrequency}`);
+  }
+  return {
+    data: decodeHandlerLatency(payload, 24, 72),
+    depth: decodeHandlerLatency(payload, 48, 88),
+    publisherAllocBytesTotal: payload.readBigInt64LE(104),
+    serialize: {
+      p50Ns: readNs(payload, 112),
+      p99Ns: readNs(payload, 116),
+      p999Ns: readNs(payload, 120),
+      maxNs: readNs(payload, 124),
+      sampleCount: payload.readBigUInt64LE(128),
+    },
+    stopwatchFrequency,
+    ringDropsTotal: payload.readBigUInt64LE(144),
+    sampleOverrunsTotal: payload.readBigUInt64LE(152),
   };
 }

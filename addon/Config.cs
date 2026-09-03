@@ -35,6 +35,11 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         public int RingCapacity;
         public string PipeName;
 
+        // Optional. When set, the publisher thread appends one CSV line per instrument and
+        // handler kind every 10 s to this file (step 2 instrumentation, read by the step 5
+        // harness). Null or empty disables the dump; nothing is opened.
+        public string DumpTo;
+
         // Null unless the file declared an "execution" object; never written by default.
         public ExecutionConfig Execution;
 
@@ -44,6 +49,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             PushRateHz = 100;
             RingCapacity = 65536;
             PipeName = "obsidianflow-orderflow-v1";
+            DumpTo = null;
             Execution = null;
         }
 
@@ -166,6 +172,13 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             sb.Append("  \"pipeName\": ");
             AppendJsonString(sb, c.PipeName);
 
+            if (!string.IsNullOrEmpty(c.DumpTo))
+            {
+                sb.Append(",\r\n");
+                sb.Append("  \"dumpTo\": ");
+                AppendJsonString(sb, c.DumpTo);
+            }
+
             if (c.Execution != null)
             {
                 sb.Append(",\r\n");
@@ -260,6 +273,13 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                 string pipe = value as string;
                 if (!string.IsNullOrEmpty(pipe))
                     c.PipeName = pipe;
+            }
+
+            if (map.TryGetValue("dumpTo", out value))
+            {
+                string dump = value as string;
+                if (!string.IsNullOrEmpty(dump))
+                    c.DumpTo = dump;
             }
 
             if (map.TryGetValue("execution", out value))

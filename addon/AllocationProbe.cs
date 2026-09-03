@@ -28,6 +28,25 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             return Probe();
         }
 
+        // The value every reported allocation figure takes when the counter is unavailable. It
+        // is negative so it can never be mistaken for a measured zero: on the wire (i64), in the
+        // CSV dump and in the status window, -1 means "not measured", and 0 means "measured
+        // zero bytes".
+        public const long Unavailable = -1L;
+
+        // Label the status window and the CSV dump use next to an unavailable figure.
+        public const string UnavailableLabel = "unavailable";
+
+        // Passes a measured value through when the counter is available and substitutes
+        // Unavailable otherwise. Also maps the feed's "no window yet" sentinel (-1) to itself,
+        // so callers can treat any negative as "no figure".
+        public static long Report(long measured)
+        {
+            if (!IsAvailable)
+                return Unavailable;
+            return measured;
+        }
+
         // Resolved by reflection once, at type initialization, so the AddOn compiles and runs
         // regardless of which .NET Framework servicing level the host exposes this method at.
         private static Func<long> Resolve()

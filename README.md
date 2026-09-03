@@ -7,12 +7,14 @@ Apache-2.0.
 
 ## Status
 
-**Build step 1 of 10. Transport only.** This repository is structured so that data can leave the
-NinjaTrader process without blocking its data thread, and so that a Node process can decode it.
-Whether it actually does is a measurement, and no measurement has been taken yet. The AddOn now
-records the two inputs that measurement will need - raw handler durations, and a data-thread
-allocation counter sampled every 1024 events - but the histogram, the harness and the numbers all
-land in later build steps. Nothing about the market is computed yet.
+**Build step 2 of 10. Transport and instrumentation.** This repository is structured so that
+data can leave the NinjaTrader process without blocking its data thread, and so that a Node
+process can decode it. Whether it actually does is a measurement. The AddOn now takes that
+measurement of itself - handler durations into a log-linear histogram, allocation counters
+sampled every 1024 events, its own frame-serialize time - and publishes it in every snapshot,
+in the status window, through the `latency_report` tool and optionally as a CSV dump. The
+harness that drives it under stated load, and therefore any number worth quoting, lands in
+build step 5. Nothing about the market is computed yet.
 
 What exists today:
 
@@ -21,11 +23,13 @@ What exists today:
   single-producer/single-consumer ring, and returns. A publisher thread drains the rings,
   **discards the contents**, and writes counter frames down a named pipe.
 - A binary wire format (`schema/wire-v1.md`) with golden files.
-- A TypeScript MCP server (`server/`) with two tools, `health` and `instruments`, both answering
+- A TypeScript MCP server (`server/`) with three tools, `health`, `instruments` and
+  `latency_report` (build step 2; the AddOn's own in-process handler and serializer timings with
+  an environment block from `server/orderflow.config.json`), all answering
   from an in-process cache.
 
 What does not exist yet: price state, VWAP, volume profile, book state, DOM dynamics, events,
-the benchmark harness, adapters, and execution. Those are build steps 2 through 10.
+the benchmark harness, adapters, and execution. Those are build steps 3 through 10.
 
 No performance number has been measured, and none is published. See
 `docs/latency-methodology.md` for how any future number will be reported.
@@ -98,8 +102,10 @@ The AddOn has no tests in this repository; it compiles and runs only inside Ninj
 
 Carried from the specification, and load-bearing for anything added later:
 
-1. The NinjaTrader data-thread handlers copy, push, and return. No calculation, no I/O, no locks,
-   no allocation, no logging, no string formatting, no LINQ, no closures.
+1. The NinjaTrader data-thread handlers copy the event into a struct, push it into a ring, and
+   return. The handler body contains no calculation, I/O, lock statement, heap allocation,
+   logging, string formatting, LINQ or closure; this describes what the code is, and what it
+   costs is measured by the step-5 harness, not asserted here.
 2. IPC stays out of the read path. Tools answer from memory.
 3. Conflate, never queue. Latest wins; drops are counted and reported, not hidden.
 4. No process-wide GC settings are changed. See `docs/decisions/0002-no-gc-tampering.md`.

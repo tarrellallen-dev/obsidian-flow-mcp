@@ -18,7 +18,9 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
     public sealed class InstrumentFeed : IDisposable
     {
         // Power of two. Plain ring of the most recent handler durations in Stopwatch ticks.
-        // Step 2 turns these into a histogram; step 1 only counts them.
+        // The publisher thread drains it into a LatencyHistogram (step 2); the handler only
+        // stores and increments. If the publisher falls more than SampleCapacity behind, the
+        // oldest samples are overwritten and counted as overruns on the publisher side.
         public const int SampleCapacity = 65536;
         private const int SampleMask = SampleCapacity - 1;
 
@@ -46,8 +48,9 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         // GC.GetAllocatedBytesForCurrentThread every AllocSampleInterval events into its own
         // preallocated slot, so the per-event cost is one mask and one compare against zero;
         // the probe itself runs once every 1024 events. Single writer each, read by the
-        // publisher thread. Step 2 turns first/last into bytes-per-event; step 1 only exposes
-        // them so the non-negotiable in spec 2.1 is measurable rather than asserted.
+        // publisher thread, which reports last - first as the running total and the delta over
+        // the most recent window as bytes per AllocSampleInterval events, so the non-negotiable
+        // in spec 2.1 is measurable rather than asserted.
         public const int AllocSampleInterval = 1024;
         private const long AllocSampleMask = AllocSampleInterval - 1;
 
@@ -55,6 +58,20 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         private long _dataAllocLast = -1;
         private long _depthAllocFirst = -1;
         private long _depthAllocLast = -1;
+
+        // Bytes allocated between the two most recent probes, i.e. over the last
+        // AllocSampleInterval events. Computed on the handler thread and stored as one 64-bit
+        // value so the publisher reads a whole window and never a torn pair. -1 until the
+        // second probe has run.
+        private long _dataAllocWindow = -1;
+        private long _depthAllocWindow = -1;
+
+        // ManagedThreadId of the thread that last ran each probe, -1 until the first probe. The
+        // counter is thread-wide: several feeds whose handlers NT raises on one thread read the
+        // same number, and it includes NT's own allocations on that thread. Readers dedupe by
+        // this id before summing.
+        private int _dataAllocThreadId = -1;
+        private int _depthAllocThreadId = -1;
 
         private int _disposed;
 
@@ -87,16 +104,20 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         public long[] DataSampleBuffer { get { return _dataSamples; } }
         public long[] DepthSampleBuffer { get { return _depthSamples; } }
 
-        // Bytes allocated on the two data threads between the first and the most recent alloc
-        // sample. Returns 0 before two samples exist, and 0 when the host runtime does not expose
-        // the counter (check AllocationProbe.IsAvailable before reporting this as measured).
+        // Bytes allocated on the handler's thread between the first and the most recent alloc
+        // probe. Returns AllocationProbe.Unavailable (-1) before the first probe has run, so an
+        // idle instrument never reports "measured zero". Returns 0 when the host runtime does not
+        // expose the counter, because the probe returns 0; callers pass the value through
+        // AllocationProbe.Report, which turns that case into -1 as well.
         public long DataThreadAllocDelta
         {
             get
             {
                 long first = Volatile.Read(ref _dataAllocFirst);
                 long last = Volatile.Read(ref _dataAllocLast);
-                return first < 0 || last < first ? 0L : last - first;
+                if (first < 0)
+                    return AllocationProbe.Unavailable;
+                return last < first ? 0L : last - first;
             }
         }
 
@@ -106,9 +127,26 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             {
                 long first = Volatile.Read(ref _depthAllocFirst);
                 long last = Volatile.Read(ref _depthAllocLast);
-                return first < 0 || last < first ? 0L : last - first;
+                if (first < 0)
+                    return AllocationProbe.Unavailable;
+                return last < first ? 0L : last - first;
             }
         }
+
+        // Thread that ran each probe last, -1 until the first probe.
+        public int DataAllocThreadId { get { return Volatile.Read(ref _dataAllocThreadId); } }
+        public int DepthAllocThreadId { get { return Volatile.Read(ref _depthAllocThreadId); } }
+
+        // Bytes allocated on the data thread over the most recent AllocSampleInterval events,
+        // or -1 before two probes exist. Read on the publisher thread. Callers must substitute
+        // -1 when AllocationProbe.IsAvailable is false: this returns 0 in that case because the
+        // probe returns 0, and 0 must never be reported as "measured zero" then.
+        public long DataAllocBytesPerWindow { get { return Volatile.Read(ref _dataAllocWindow); } }
+        public long DepthAllocBytesPerWindow { get { return Volatile.Read(ref _depthAllocWindow); } }
+
+        // Samples recorded by each handler, individually. Read on the publisher thread.
+        public long DataSampleIndex { get { return Volatile.Read(ref _dataSampleIndex); } }
+        public long DepthSampleIndex { get { return Volatile.Read(ref _depthSampleIndex); } }
 
         // Called once from the AddOn worker thread. Returns false with a reason when the
         // instrument cannot be resolved; the AddOn keeps running for the other instruments.
@@ -175,19 +213,26 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
 
             _dataRing.Push(ref ev);
 
-            // Single-writer ring write: increment, mask, store. No branch, no atomic.
             long di = _dataSampleIndex;
-            _dataSamples[(int)(di & SampleMask)] = Stopwatch.GetTimestamp() - t0;
-            Volatile.Write(ref _dataSampleIndex, di + 1);
 
-            // One mask and one compare per event; the probe runs once per AllocSampleInterval.
+            // The probe runs once per AllocSampleInterval events. It sits inside the timed
+            // region on purpose, so its own cost shows up in the handler's p99 and max instead
+            // of being hidden by the instrumentation that reports them.
             if ((di & AllocSampleMask) == 0L)
             {
                 long bytes = AllocationProbe.Read();
-                if (_dataAllocFirst < 0)
+                long last = _dataAllocLast;
+                if (last >= 0)
+                    Volatile.Write(ref _dataAllocWindow, bytes - last);
+                else
                     Volatile.Write(ref _dataAllocFirst, bytes);
                 Volatile.Write(ref _dataAllocLast, bytes);
+                Volatile.Write(ref _dataAllocThreadId, Thread.CurrentThread.ManagedThreadId);
             }
+
+            // Single-writer sample ring: store the duration, then publish the index.
+            _dataSamples[(int)(di & SampleMask)] = Stopwatch.GetTimestamp() - t0;
+            Volatile.Write(ref _dataSampleIndex, di + 1);
         }
 
         private void OnMarketDepthUpdate(object sender, MarketDepthEventArgs e)
@@ -209,16 +254,21 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             _depthRing.Push(ref ev);
 
             long si = _depthSampleIndex;
-            _depthSamples[(int)(si & SampleMask)] = Stopwatch.GetTimestamp() - t0;
-            Volatile.Write(ref _depthSampleIndex, si + 1);
 
             if ((si & AllocSampleMask) == 0L)
             {
                 long bytes = AllocationProbe.Read();
-                if (_depthAllocFirst < 0)
+                long last = _depthAllocLast;
+                if (last >= 0)
+                    Volatile.Write(ref _depthAllocWindow, bytes - last);
+                else
                     Volatile.Write(ref _depthAllocFirst, bytes);
                 Volatile.Write(ref _depthAllocLast, bytes);
+                Volatile.Write(ref _depthAllocThreadId, Thread.CurrentThread.ManagedThreadId);
             }
+
+            _depthSamples[(int)(si & SampleMask)] = Stopwatch.GetTimestamp() - t0;
+            Volatile.Write(ref _depthSampleIndex, si + 1);
         }
 
         // ---------------------------------------------------------------------------------
