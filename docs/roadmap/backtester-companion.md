@@ -50,7 +50,7 @@ store directly: NinjaTrader does not need to be running, connected, or asked to 
 anything, and the replay path is a sequential file read into the same ring the live server
 drains rather than a trip through NinjaTrader's data layer.
 
-Ingestion is the only step that ever touches NT8, and it is a one-time cost per session. Two
+The AddOn side of this is the archive lane of ADR 0003 (`docs/decisions/0003-two-lanes-hot-and-archive.md`): the same drain that serves the live hot lane also writes every raw event to the store, without ever slowing the hot lane. Ingestion is the only step that ever touches NT8, and it is a one-time cost per session. Two
 ways in: the AddOn's `recordTo` writes the store format directly while a session plays (live or
 Market Replay), and the importer converts exports or third-party files offline. The store keeps a
 provenance line per session (source, capture time, whether depth is present, AddOn and schema
