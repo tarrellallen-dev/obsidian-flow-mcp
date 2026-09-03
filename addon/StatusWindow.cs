@@ -1,4 +1,4 @@
-// ObsidianFlow Order-Flow MCP - AddOn
+// Obsidian Flow MCP - AddOn
 // Minimal status window. Built in code, no XAML, so the whole AddOn is a flat set of .cs files
 // that can be copied into bin\Custom\AddOns.
 // Spec section 3.1: anything touching WPF runs on the UI thread and never blocks the data or
@@ -38,7 +38,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
 
         public StatusWindow()
         {
-            Caption = "Obsidian Flow Order-Flow MCP";
+            Caption = "Obsidian Flow MCP";
             Width = 720;
             Height = 460;
 

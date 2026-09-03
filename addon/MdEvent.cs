@@ -1,4 +1,4 @@
-// ObsidianFlow Order-Flow MCP - AddOn
+// Obsidian Flow MCP - AddOn
 // Spec section 3.1: blittable ring slot struct.
 // .NET Framework 4.8. ASCII only.
 

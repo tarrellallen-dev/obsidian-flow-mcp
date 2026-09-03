@@ -1,4 +1,4 @@
-// ObsidianFlow Order-Flow MCP - AddOn
+// Obsidian Flow MCP - AddOn
 // Spec section 8: handler time as percentiles, never averages. This is a hand-rolled
 // log-linear histogram with no dependencies (HdrHistogram is a NuGet package, and NuGet
 // packages do not resolve from bin\Custom). It is owned and updated only by the publisher

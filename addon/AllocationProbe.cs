@@ -1,4 +1,4 @@
-// ObsidianFlow Order-Flow MCP - AddOn
+// Obsidian Flow MCP - AddOn
 // Reads the per-thread allocation counter. Spec 2.4 and docs/decisions/0002-no-gc-tampering.md:
 // this reads a counter and changes no GC setting anywhere.
 // .NET Framework 4.8. ASCII only.

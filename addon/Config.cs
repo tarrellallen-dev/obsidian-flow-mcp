@@ -1,4 +1,4 @@
-// ObsidianFlow Order-Flow MCP - AddOn
+// Obsidian Flow MCP - AddOn
 // Configuration file: Documents\NinjaTrader 8\ObsidianFlow.OrderFlowMcp.json
 // .NET Framework 4.8. ASCII only.
 //

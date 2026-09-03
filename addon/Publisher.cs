@@ -1,4 +1,4 @@
-// ObsidianFlow Order-Flow MCP - AddOn
+// Obsidian Flow MCP - AddOn
 // Spec sections 3.1 and 3.3: one publisher thread, named pipe server, length-prefixed frames.
 // Step 1 computes nothing about the market. It drains the rings, discards the contents, counts,
 // and publishes transport-level counters so the threading contract can be proved.

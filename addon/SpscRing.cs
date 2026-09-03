@@ -1,4 +1,4 @@
-// ObsidianFlow Order-Flow MCP - AddOn
+// Obsidian Flow MCP - AddOn
 // Spec section 3.1: the single ring protocol. Single producer, single consumer.
 // .NET Framework 4.8. ASCII only.
 

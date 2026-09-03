@@ -23,7 +23,7 @@ copy it back here before committing, or the next copy overwrites it.
 3. Copy every `.cs` file from this directory into that folder. Do not copy `README.md`.
 4. In NinjaTrader, open the NinjaScript Editor (New > NinjaScript Editor) and press **F5**
    to compile. Compile errors appear in the editor's error list.
-5. On a successful compile, NinjaScript reloads the AddOn. A new item **Order-Flow MCP**
+5. On a successful compile, NinjaScript reloads the AddOn. A new item **Obsidian Flow MCP**
    appears under the Control Center **New** menu; it opens the status window.
 
 Repeat steps 3 and 4 after every change made here.

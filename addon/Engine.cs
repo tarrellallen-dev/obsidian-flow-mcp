@@ -1,4 +1,4 @@
-// ObsidianFlow Order-Flow MCP - AddOn
+// Obsidian Flow MCP - AddOn
 // Owns config, the per-instrument feeds and the publisher thread. Start/Stop is idempotent.
 // .NET Framework 4.8. ASCII only.
 

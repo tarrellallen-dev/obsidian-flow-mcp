@@ -17,7 +17,7 @@ import { StateCache } from "./cache/stateCache.js";
 import { loadServerConfig, type ServerConfig } from "./config.js";
 import { PipeClient, resolveEndpoint, type PipeClientOptions } from "./transport/pipeClient.js";
 
-export const SERVER_NAME = "obsidian-flow-orderflow-mcp";
+export const SERVER_NAME = "obsidian-flow-mcp";
 export const SERVER_VERSION = "0.2.0";
 
 /** Spec section 8: every published number carries its environment. Built once per call. */

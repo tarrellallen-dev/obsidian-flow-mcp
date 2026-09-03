@@ -1,4 +1,4 @@
-# Obsidian Flow Order-Flow MCP
+# Obsidian Flow MCP
 
 By The Boy Prodigy (Tarrell Allen) for Obsidian Flow, obsidianflow.tech.
 

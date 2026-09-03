@@ -1,4 +1,4 @@
-// ObsidianFlow Order-Flow MCP - AddOn
+// Obsidian Flow MCP - AddOn
 // Spec sections 2.1 and 3.1: one instrument, two subscriptions, two SPSC rings.
 // The handlers copy into a blittable struct, push, and return. Nothing else.
 // .NET Framework 4.8. ASCII only.

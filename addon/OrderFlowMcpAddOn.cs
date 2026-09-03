@@ -1,5 +1,5 @@
-// ObsidianFlow Order-Flow MCP - AddOn entry point.
-// Spec section 3.1: one AddOnBase subclass, one NTMenuItem "Order-Flow MCP" under the
+// Obsidian Flow MCP - AddOn entry point.
+// Spec section 3.1: one AddOnBase subclass, one NTMenuItem "Obsidian Flow MCP" under the
 // Control Center "New" menu, opening a small status window.
 // .NET Framework 4.8. ASCII only.
 
@@ -19,8 +19,8 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         {
             if (State == State.SetDefaults)
             {
-                Name = "ObsidianFlow Order-Flow MCP";
-                Description = "Obsidian Flow Order-Flow MCP by The Boy Prodigy. Publishes NinjaTrader market data over a named pipe for the Obsidian Flow Order-Flow MCP server.";
+                Name = "Obsidian Flow MCP";
+                Description = "Obsidian Flow MCP by The Boy Prodigy. Publishes NinjaTrader market data over a named pipe for the Obsidian Flow MCP server.";
             }
             else if (State == State.Configure)
             {
@@ -32,7 +32,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                 catch (Exception ex)
                 {
                     NinjaTrader.Code.Output.Process(
-                        "ObsidianFlow Order-Flow MCP: start failed: " + ex.Message,
+                        "Obsidian Flow MCP: start failed: " + ex.Message,
                         PrintTo.OutputTab1);
                 }
             }
@@ -59,7 +59,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                 return;
 
             _menuItem = new NTMenuItem();
-            _menuItem.Header = "Obsidian Flow Order-Flow MCP";
+            _menuItem.Header = "Obsidian Flow MCP";
             _menuItem.Style = Application.Current.TryFindResource("MainMenuItem") as Style;
             _menuItem.Click += OnMenuItemClick;
 
@@ -90,7 +90,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             catch (Exception ex)
             {
                 NinjaTrader.Code.Output.Process(
-                    "ObsidianFlow Order-Flow MCP: status window failed: " + ex.Message,
+                    "Obsidian Flow MCP: status window failed: " + ex.Message,
                     PrintTo.OutputTab1);
             }
         }
