@@ -51,11 +51,11 @@ Every published table carries all of the following. A table missing any field do
 - Windows edition and build number
 - Bare metal or VM, and if VM, the hypervisor and the vCPU allocation
 - Power plan and whether it was pinned during the run
-- NinjaTrader 8 build number (Help > About)
+- NinjaTrader 8 build number (Help > About) - currently 8.1.8.2 64-bit on the development machine
 - `Stopwatch.Frequency` and `Stopwatch.IsHighResolution` as observed in the NinjaTrader process
 - .NET Framework version of the host process
 - Node version for the server-side numbers
-- Data feed and connection type, and whether Level 2 depth was present
+- Data feed and connection type, and whether Level 2 depth was present - currently Rithmic (CME Level 2) on the development machine
 - Instrument and session
 - Offered load, run duration, and warm-up discarded
 - Number of runs and which run the table reports
@@ -67,7 +67,5 @@ AddOn loaded, and both rankings are published unedited alongside the table.
 
 ## Open items before any number is published
 
-- NinjaTrader 8 build number is not yet recorded.
 - The benchmark harness (`bench/`) is a placeholder; build step 5.
-- Depth availability on the development machine is unconfirmed, so number 1 has no depth-load
-  variant yet.
+- No run has been made on the recorded environment, so every row above is still empty.

@@ -13,7 +13,9 @@ using NinjaTrader.Gui;
 
 namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
 {
-    public class StatusWindow : NTWindow
+    // Base type is fully qualified with global:: so it cannot be resolved relative to this
+    // file's own namespace, which also begins with "NinjaTrader".
+    public class StatusWindow : global::NinjaTrader.Gui.NTWindow
     {
         private readonly TextBlock _pipeName;
         private readonly TextBlock _connection;
@@ -54,7 +56,9 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
 
             Content = grid;
 
-            _timer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher);
+            // this.Dispatcher: the window's own dispatcher (the NT8 UI thread), not the
+            // System.Windows.Threading.Dispatcher type that the using directive brings into scope.
+            _timer = new DispatcherTimer(DispatcherPriority.Background, this.Dispatcher);
             _timer.Interval = TimeSpan.FromMilliseconds(500);   // 2 Hz
             _timer.Tick += OnTick;
             _timer.Start();

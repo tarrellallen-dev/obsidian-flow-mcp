@@ -228,13 +228,13 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             if (Interlocked.Exchange(ref _disposed, 1) != 0)
                 return;
 
+            // NT8's MarketData and MarketDepth<T> are not IDisposable. Detaching the handler is
+            // the whole of the teardown: once the last reference is dropped the subscription is
+            // no longer reachable and nothing of ours is left on the data thread.
             try
             {
                 if (_marketData != null)
-                {
                     _marketData.Update -= OnMarketDataUpdate;
-                    _marketData.Dispose();
-                }
             }
             catch (Exception)
             {
@@ -248,10 +248,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             try
             {
                 if (_marketDepth != null)
-                {
                     _marketDepth.Update -= OnMarketDepthUpdate;
-                    _marketDepth.Dispose();
-                }
             }
             catch (Exception)
             {

@@ -43,6 +43,8 @@ if it does not exist:
 ```
 
 - `instruments` - NinjaTrader instrument names, resolved with `Instrument.GetInstrument`.
+- an optional `execution` object (`enabled`, `allowUnarmedKillSwitch`) is parsed if present and
+  acted on by nothing in this build step. Unknown keys are ignored rather than rejected.
 - `pushRateHz` - snapshot frames per second per instrument.
 - `ringCapacity` - per-ring slot count, rounded up to a power of two.
 - `pipeName` - the server side listens on `\\.\pipe\<pipeName>`.
@@ -55,7 +57,7 @@ The file is read once at start. Change it, then recompile (F5) or restart NinjaT
 |---|---|
 | `OrderFlowMcpAddOn.cs` | `AddOnBase` subclass, Control Center menu item, start/stop |
 | `Engine.cs` | Process-wide singleton owning config, feeds and the publisher |
-| `Config.cs` | JSON config load/write (Newtonsoft.Json; see the comment at the top of the file) |
+| `Config.cs` | JSON config load/write, hand-rolled with no dependencies (see the comment at the top of the file) |
 | `MdEvent.cs` | Blittable ring slot struct |
 | `SpscRing.cs` | Single-producer/single-consumer ring, drop-newest on full |
 | `InstrumentFeed.cs` | Market data and market depth subscriptions, hot-path handlers |
