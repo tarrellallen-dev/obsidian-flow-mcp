@@ -37,7 +37,37 @@ and run it with the default options.
 Either way, close PowerShell and open a new window before checking `node -v` again - the installer
 edits PATH and an already-open window will not see it.
 
-## 2. Build the server
+## 2. If PowerShell refuses to run npm
+
+A default Windows install blocks PowerShell scripts, and npm ships as one. The symptom:
+
+```
+npm : File C:\Program Files\nodejs\npm.ps1 cannot be loaded because running scripts
+is disabled on this system.
+```
+
+Node is fine; this is a shell policy. Two ways past it.
+
+**Without changing anything**, call the batch shim instead of the PowerShell one - substitute
+`npm.cmd` for `npm` in every command below:
+
+```powershell
+npm.cmd install
+```
+
+`cmd.exe` also runs plain `npm` with no policy involved.
+
+**Or allow local scripts for your account** (no administrator rights required):
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+```
+
+That permits scripts on your own disk while still blocking unsigned ones downloaded from the
+internet. It changes a security setting for your user account, so make it a deliberate choice
+rather than a reflex.
+
+## 3. Build the server
 
 An ordinary PowerShell window is fine and is preferable to an elevated one: npm needs no
 administrator rights, and installing as Administrator can leave `node_modules` owned awkwardly.
@@ -54,7 +84,7 @@ npm run build
 should report all tests passing; it runs entirely offline against a local socket and does not
 need NinjaTrader.
 
-## 3. Check the pipe exists
+## 4. Check the pipe exists
 
 Start NinjaTrader, connect a data feed, and open **New > Obsidian Flow MCP** from the Control
 Center. The AddOn creates its pipe when the engine starts. In PowerShell:
@@ -74,7 +104,7 @@ expired contract typed that way produces a connected pipe with no market data, w
 window's "Resolved as" row marks as EXPIRED and the events-drained row shows as zero. See
 `addon/README.md`, "Instrument names", for the three accepted shapes.
 
-## 4. Point an MCP client at it
+## 5. Point an MCP client at it
 
 For your MCP client, edit its MCP server configuration file:
 
@@ -98,7 +128,7 @@ command is `node <path to dist/src/index.js>`.
 The server starts even when NinjaTrader is closed: it reports the link as down and keeps
 retrying, so the client never has to be restarted because the platform was.
 
-## 5. First calls
+## 6. First calls
 
 - `health` - link state, staleness, dropped events, and the AddOn's push rate.
 - `instruments` - what the AddOn announced, with tick size and session template.
