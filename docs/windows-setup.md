@@ -6,28 +6,41 @@ local-only and is never exposed to a network.
 
 Do these once, in order.
 
-## 1. Install Node
+## 1. Node
 
-Node 20 or newer. In PowerShell:
-
-```powershell
-winget install OpenJS.NodeJS.LTS
-```
-
-If `winget` is unavailable, download the LTS **Windows Installer (.msi)** from nodejs.org and
-run it with the default options.
-
-Close PowerShell and open a new one (the installer edits PATH; an old window will not see it),
-then confirm:
+Node 20 or newer. Check first - you may already have it:
 
 ```powershell
 node -v
 npm -v
 ```
 
-`node -v` must print v20 or higher.
+If `node -v` prints v20 or higher, skip to step 2.
+
+Otherwise:
+
+```powershell
+winget install OpenJS.NodeJS.LTS
+```
+
+If winget reports `Failed when searching source: msstore` with a certificate error, that is the
+Microsoft Store source being unreachable, not a problem with the package. Name the source
+explicitly:
+
+```powershell
+winget install OpenJS.NodeJS.LTS --source winget
+```
+
+If winget is unavailable altogether, download the LTS **Windows Installer (.msi)** from nodejs.org
+and run it with the default options.
+
+Either way, close PowerShell and open a new window before checking `node -v` again - the installer
+edits PATH and an already-open window will not see it.
 
 ## 2. Build the server
+
+An ordinary PowerShell window is fine and is preferable to an elevated one: npm needs no
+administrator rights, and installing as Administrator can leave `node_modules` owned awkwardly.
 
 ```powershell
 cd "$env:USERPROFILE\Documents\nt8-the-boy-prodigy-orderflow-mcp\server"
