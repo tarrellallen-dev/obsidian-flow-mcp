@@ -421,7 +421,9 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                     return null;
                 // Trust nothing: the row came back from a database lookup, so check it is the
                 // thing that was asked for before any of it is used.
-                if (!string.Equals(Safe(master.Name), name, StringComparison.OrdinalIgnoreCase))
+                // Safe() belongs to InstrumentIdentity, not to this class. string.Equals handles a
+                // null on either side on its own, so nothing is needed here.
+                if (!string.Equals(master.Name, name, StringComparison.OrdinalIgnoreCase))
                     return null;
                 if (master.InstrumentType != type)
                     return null;
