@@ -82,6 +82,7 @@ async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void
 describe("fake publisher over a unix socket", () => {
   let dir: string;
   let socketPath: string;
+  let pipeName: string | undefined;
   let server: net.Server;
   let connections: net.Socket[];
   let client: PipeClient | null;
@@ -90,16 +91,36 @@ describe("fake publisher over a unix socket", () => {
     sequence = 0;
     connections = [];
     client = null;
-    dir = mkdtempSync(join(tmpdir(), "of-mcp-"));
-    socketPath = join(dir, "of.sock");
+    // Windows cannot listen on a filesystem socket path - Node wants a named
+    // pipe there, which is also what the AddOn actually uses. Elsewhere a Unix
+    // socket in a temp directory stands in for it. Same code path either way;
+    // only the endpoint string differs.
+    if (process.platform === "win32") {
+      dir = "";
+      pipeName = `of-mcp-test-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+      socketPath = `\\\\.\\pipe\\${pipeName}`;
+    } else {
+      dir = mkdtempSync(join(tmpdir(), "of-mcp-"));
+      pipeName = undefined;
+      socketPath = join(dir, "of.sock");
+    }
   });
 
   afterEach(async () => {
     client?.stop();
     for (const c of connections) c.destroy();
     await new Promise<void>((resolve) => server?.close(() => resolve()));
-    rmSync(dir, { recursive: true, force: true });
+    if (dir) rmSync(dir, { recursive: true, force: true });
   });
+
+  // The endpoint options a PipeClient needs for whichever transport this
+  // platform uses. `health.endpoint` is asserted against `socketPath`, which
+  // holds the pipe path on Windows and the socket path elsewhere.
+  function clientEndpoint() {
+    return process.platform === "win32"
+      ? { platform: "win32" as NodeJS.Platform, pipeName }
+      : { platform: "linux" as NodeJS.Platform, socketPath };
+  }
 
   function startPublisher(onConnection: (socket: net.Socket) => void): Promise<void> {
     server = net.createServer((socket) => {
@@ -118,7 +139,7 @@ describe("fake publisher over a unix socket", () => {
     });
 
     const cache = new StateCache();
-    client = new PipeClient({ platform: "linux", socketPath, minBackoffMs: 10, maxBackoffMs: 20 });
+    client = new PipeClient({ ...clientEndpoint(), minBackoffMs: 10, maxBackoffMs: 20 });
     attach(cache, client);
     client.start();
 
@@ -162,7 +183,7 @@ describe("fake publisher over a unix socket", () => {
     });
 
     const cache = new StateCache();
-    client = new PipeClient({ platform: "linux", socketPath, minBackoffMs: 10, maxBackoffMs: 20 });
+    client = new PipeClient({ ...clientEndpoint(), minBackoffMs: 10, maxBackoffMs: 20 });
     attach(cache, client);
     client.start();
 
@@ -186,8 +207,7 @@ describe("fake publisher over a unix socket", () => {
 
     const cache = new StateCache();
     client = new PipeClient({
-      platform: "linux",
-      socketPath,
+      ...clientEndpoint(),
       minBackoffMs: 10,
       maxBackoffMs: 20,
       random: () => 0,
@@ -210,7 +230,7 @@ describe("fake publisher over a unix socket", () => {
     });
 
     const cache = new StateCache();
-    client = new PipeClient({ platform: "linux", socketPath, minBackoffMs: 10, maxBackoffMs: 20 });
+    client = new PipeClient({ ...clientEndpoint(), minBackoffMs: 10, maxBackoffMs: 20 });
     attach(cache, client);
     client.start();
     await waitFor(() => cache.viewInstrument(0)?.eventsDrained === "42");

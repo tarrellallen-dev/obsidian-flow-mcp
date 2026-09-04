@@ -157,6 +157,13 @@ which exists so the server can be tested and run in CI without NinjaTrader.
 
 ## Tests
 
+The suite runs on Windows, macOS and Linux. The integration test needs a local endpoint to stand
+in for the AddOn: on Windows it opens a named pipe, which is what the AddOn itself uses, and
+elsewhere a Unix domain socket in a temp directory. Node cannot listen on a filesystem socket
+path on Windows, so a test that hardcodes one fails there with `EACCES` - the endpoint is chosen
+per platform for exactly that reason.
+
+
 `server/test/` covers the decoder against the golden files, the frame splitter against random
 chunk boundaries, the cache's staleness and reconnect semantics, and an end-to-end run against a
 fake publisher on a Unix socket.
