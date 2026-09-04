@@ -108,7 +108,29 @@ expired contract typed that way produces a connected pipe with no market data, w
 window's "Resolved as" row marks as EXPIRED and the events-drained row shows as zero. See
 `addon/README.md`, "Instrument names", for the four accepted shapes.
 
-## 5. Point an MCP client at it
+## 5. Prove the wire before wiring up a client
+
+The test suite proves the decoder against golden files this repository generated. That is a
+check that the decoder matches the specification - not that the AddOn does. Only this step
+checks the two halves against each other, and it is the step worth doing before blaming an MCP
+client for anything.
+
+With NinjaTrader running, the status window open, and no MCP server running (the AddOn accepts
+one client at a time):
+
+```powershell
+node scripts\pipe-smoke.mjs --seconds 20
+```
+
+It attaches with the same client the server uses, prints the hello - stopwatch frequency, every
+instrument with its tick size and how it was resolved - then a snapshot line as they arrive, and
+ends in `PASS` or `FAIL` with the reason. In NinjaTrader, **Frames sent** moves off zero while it
+runs; that is the AddOn's side of the same event.
+
+`PASS` with no trade price is still a pass: framing is proven either way, and a quiet or closed
+market will do that. `FAIL` says which of connect, hello or snapshot did not happen.
+
+## 6. Point an MCP client at it
 
 For your MCP client, edit its MCP server configuration file:
 
@@ -132,7 +154,7 @@ command is `node <path to dist/src/index.js>`.
 The server starts even when NinjaTrader is closed: it reports the link as down and keeps
 retrying, so the client never has to be restarted because the platform was.
 
-## 6. First calls
+## 7. First calls
 
 - `health` - link state, staleness, dropped events, and the AddOn's push rate.
 - `instruments` - what the AddOn announced, with tick size and session template.

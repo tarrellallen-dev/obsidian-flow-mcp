@@ -156,6 +156,21 @@ npm run build
 npm start
 ```
 
+### Proving the two halves agree
+
+```
+node scripts/pipe-smoke.mjs --seconds 20
+```
+
+With NinjaTrader running and no MCP server attached, this connects to the AddOn with the same
+client the server uses, prints the hello and the snapshots as they arrive, and exits `PASS` or
+`FAIL` with a reason. The test suite checks the decoder against golden files this repository
+generated, which says the decoder matches the specification; it says nothing about whether the
+publisher does. This is the check that does, and it is the one that needs NinjaTrader.
+
+Off Windows, `scripts/golden-replay.mjs` serves the golden frames over a Unix socket so the check
+itself can be run - and is, in CI - without the platform.
+
 The server speaks MCP over stdio. On Windows it connects to the named pipe; set `OF_PIPE_NAME`
 to override the name. On Linux and macOS it connects to the Unix socket in `OF_SOCKET_PATH`,
 which exists so the server can be tested and run in CI without NinjaTrader.

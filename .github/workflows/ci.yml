@@ -42,3 +42,15 @@ jobs:
 
       - name: Publish gate
         run: node scripts/publish-gate.mjs
+
+      # scripts/pipe-smoke.mjs is what a user runs to prove the AddOn and the
+      # decoder agree on the wire. It needs NinjaTrader, which CI does not have,
+      # so CI runs it against this repository's own golden frames instead. That
+      # does not test the AddOn - nothing here can - but it does test the check,
+      # which otherwise ships having never been run.
+      - name: Wire smoke check against golden frames
+        working-directory: .
+        run: |
+          node scripts/golden-replay.mjs /tmp/of-ci.sock &
+          sleep 1
+          OF_SOCKET_PATH=/tmp/of-ci.sock node scripts/pipe-smoke.mjs --seconds 3
