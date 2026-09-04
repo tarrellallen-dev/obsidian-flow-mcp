@@ -35,6 +35,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         private readonly TextBlock _serialize;
         private readonly TextBlock _dump;
         private readonly TextBlock _messages;
+        private readonly TextBlock _diagnosis;
 
         private readonly DispatcherTimer _timer;
 
@@ -59,6 +60,8 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             _rolls = AddRow(grid, ref row, "Contract rolls");
             _rolls.TextWrapping = TextWrapping.Wrap;
             _eventsDrained = AddRow(grid, ref row, "Events drained");
+            _diagnosis = AddRow(grid, ref row, "Why zero");
+            _diagnosis.TextWrapping = TextWrapping.Wrap;
             _drops = AddRow(grid, ref row, "Drops");
             _framesSent = AddRow(grid, ref row, "Frames sent");
             _allocDelta = AddRow(grid, ref row, "Publisher alloc delta");
@@ -145,6 +148,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                     _pipeName.Text = "-";
                     _connection.Text = engine.IsRunning ? "starting" : "stopped";
                     _eventsDrained.Text = "-";
+                    _diagnosis.Text = "-";
                     _drops.Text = "-";
                     _framesSent.Text = "-";
                     _allocDelta.Text = "-";
@@ -165,6 +169,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                     _connection.Text = state;
 
                     _eventsDrained.Text = publisher.EventsDrained.ToString();
+                    _diagnosis.Text = Diagnose(publisher.EventsDrained, feeds, unresolved);
                     _drops.Text = publisher.DroppedTotal.ToString();
                     _framesSent.Text = publisher.FramesSent.ToString();
                     _allocDelta.Text = AllocationProbe.IsAvailable
@@ -284,6 +289,47 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                 sb.Append(unresolved[i].Typed).Append(" -> UNRESOLVED: ").Append(unresolved[i].Reason);
             }
             return sb.Length == 0 ? "-" : sb.ToString();
+        }
+
+        // A row that stays quiet while data flows and says something useful when it does not.
+        // Zero events with a green connection is the state this AddOn is most likely to be found
+        // in by someone who has just installed it, and the reason is nearly always in the config
+        // rather than in the code: an expired contract month, or a name that resolved to a
+        // different instrument than the one meant. Both were already on screen - the expiry date
+        // sat mid-line in "Resolved as" - and both were still missed, so the reason gets its own
+        // row and says what to do about it.
+        private static string Diagnose(long eventsDrained, InstrumentFeed[] feeds, UnresolvedInstrument[] unresolved)
+        {
+            if (eventsDrained > 0)
+                return "-";
+
+            if (feeds.Length == 0)
+            {
+                if (unresolved.Length > 0)
+                    return "Nothing is subscribed: every instrument in the config was unresolved. See \"Resolved as\".";
+                return "Nothing is subscribed: the config lists no instruments.";
+            }
+
+            DateTime now = DateTime.Now;
+            StringBuilder sb = new StringBuilder(192);
+            for (int i = 0; i < feeds.Length; i++)
+            {
+                InstrumentIdentity id = feeds[i].Identity;
+                if (id == null || !id.IsExpiredAt(now))
+                    continue;
+                if (sb.Length > 0)
+                    sb.Append(Environment.NewLine);
+                sb.Append(id.FullName).Append(" expired on ").Append(id.ExpiryText())
+                  .Append(". An expired contract never receives data, live or delayed. Put \"")
+                  .Append(id.MasterName)
+                  .Append(":Future\" in the config to follow the front contract, then reopen this window.");
+            }
+            if (sb.Length > 0)
+                return sb.ToString();
+
+            return "No market data has arrived yet. Check that a feed is connected (Control Center > Connections),"
+                 + " that the connection carries these instruments, and - outside session hours - that something is"
+                 + " actually trading. Market Replay and Playback also count: press play.";
         }
 
         private static string ShapeLabel(InstrumentShape shape)
