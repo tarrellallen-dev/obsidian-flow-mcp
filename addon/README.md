@@ -83,6 +83,16 @@ The file is read once at start. Change it, then recompile (F5) or restart NinjaT
 
 ## Instrument names
 
+Four shapes are accepted: `ES 12-26` (used exactly as typed, never re-resolved), `ES:Future` (a
+root plus a type hint, resolved to the front contract and rolled), `ES` (a bare root - whatever
+NinjaTrader returns for that name), and any non-expiring symbol such as `AAPL`.
+
+Prefer the type hint for futures. NinjaTrader's instrument database holds both the CME E-mini
+future and an equity with the ticker ES, and `Instrument.GetInstrument("ES")` returns the equity,
+so a bare root subscribes to the wrong instrument without saying so. Verified on 8.1.8.2 on
+2026-09-04. A hint that does not match is reported as unresolved.
+
+
 Each `instruments` entry is resolved by `InstrumentResolver.cs` at start into an **identity
 record** (resolved name, master instrument, instrument type, exchange, currency, expiry, tick
 size, point value, trading-hours template, how it was resolved, and roll history). That record

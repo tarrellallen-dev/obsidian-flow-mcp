@@ -232,12 +232,43 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             }
 
             string name = typed.Trim();
+
+            // Optional type hint: "ES:Future". NinjaTrader's instrument database contains more
+            // than one instrument called ES - the CME E-mini future and an equity with the same
+            // ticker - and Instrument.GetInstrument("ES") returns the equity. Without a hint a
+            // bare name is whatever NT8 hands back, which is silently the wrong instrument for
+            // anyone who meant the future. Observed on 8.1.8.2, 2026-09-04.
+            string expectedType = null;
+            int colon = name.LastIndexOf(':');
+            if (colon > 0 && colon < name.Length - 1)
+            {
+                expectedType = name.Substring(colon + 1).Trim();
+                name = name.Substring(0, colon).Trim();
+                if (name.Length == 0)
+                {
+                    error = "instrument name is empty before the ':' type hint";
+                    return null;
+                }
+            }
+
             string root;
             bool qualified = HasContractMonth(name, out root);
 
             try
             {
                 Instrument direct = Instrument.GetInstrument(name);
+
+                if (expectedType != null && direct != null && direct.MasterInstrument != null)
+                {
+                    string actual = direct.MasterInstrument.InstrumentType.ToString();
+                    if (!string.Equals(actual, expectedType, StringComparison.OrdinalIgnoreCase))
+                    {
+                        error = "\"" + name + "\" resolves to a " + actual + " in NinjaTrader, not a "
+                              + expectedType + ". Name the contract in full (for example \"" + name
+                              + " 12-26\"), or correct the type hint.";
+                        return null;
+                    }
+                }
 
                 if (qualified)
                 {

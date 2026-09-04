@@ -98,8 +98,12 @@ AddOn is not running, or is running under a different pipe name - check `pipeNam
 `Documents\NinjaTrader 8\ObsidianFlow.OrderFlowMcp.json` and the status window.
 
 The `instruments` list in that file must name instruments the connected feed actually provides.
-A bare futures root such as `ES` (the default) is resolved to the front contract and rolled
-automatically; a fully qualified name with a contract month is used exactly as typed, so an
+A bare futures root is resolved to the front contract and rolled automatically - but name the
+type as well, `ES:Future`, because NinjaTrader's database also holds an equity called ES and
+`GetInstrument("ES")` returns that one. A hint that disagrees with what NinjaTrader returns is
+reported as unresolved rather than guessed at.
+
+A fully qualified name is used exactly as typed; a fully qualified name with a contract month is used exactly as typed, so an
 expired contract typed that way produces a connected pipe with no market data, which the status
 window's "Resolved as" row marks as EXPIRED and the events-drained row shows as zero. See
 `addon/README.md`, "Instrument names", for the three accepted shapes.

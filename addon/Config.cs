@@ -30,6 +30,16 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
     {
         public const string FileName = "ObsidianFlow.OrderFlowMcp.json";
 
+        // Instrument names, in any of four shapes:
+        //   "ES 12-26"   a contract named in full - used exactly as typed, never re-resolved
+        //   "ES:Future"  a root with a type hint - resolved to the front contract and rolled
+        //   "ES"         a bare root - resolved to whatever NinjaTrader returns for that name
+        //   "AAPL"       any non-expiring instrument
+        // Prefer the type hint for futures. NinjaTrader's database holds both a CME E-mini
+        // future and an equity called ES, and GetInstrument("ES") returns the equity, so a bare
+        // root silently subscribes to the wrong instrument (observed on 8.1.8.2, 2026-09-04).
+        // A hint that does not match what NinjaTrader returns is reported as unresolved rather
+        // than guessed at.
         public List<string> Instruments;
         public int PushRateHz;
         public int RingCapacity;
