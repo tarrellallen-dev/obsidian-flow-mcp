@@ -9,6 +9,13 @@ Apache-2.0.
 
 ## Status
 
+**The path this repository exists to provide is proven end to end.** On 4 September 2026, on
+NinjaTrader 8.1.8.2, the AddOn published and `scripts/pipe-smoke.mjs` decoded a live session of
+ES 09-26 with the same client the MCP server uses: hello, instrument identity, and a continuous
+snapshot stream carrying price and a session volume profile, with no framing errors and no drops.
+That is a statement about correctness, not speed; the numbers worth quoting arrive with the
+harness in build step 5.
+
 **Build step 4 of 10. Transport, instrumentation, instrument identity, and the first computed
 state: price, session VWAP and volume profiles.** This repository is structured so that
 data can leave the NinjaTrader process without blocking its data thread, and so that a Node
