@@ -122,9 +122,23 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
 
         public bool Expires { get { return ExpiryTicks != 0; } }
 
+        // Month precision, not day precision, and the reason is what NinjaTrader stores. On
+        // 8.1.8.2 a futures contract's Expiry is the FIRST of its delivery month - ES 12-26 comes
+        // back as 2026-12-01, not the third Friday. Comparing that to the clock declares every
+        // futures contract expired from the first of the month it trades in, which is most of its
+        // final three weeks of life. That is exactly how the resolver came to sit on ES 12-26 on
+        // 4 September 2026 while NinjaTrader's own log named ES 09-26 as the front contract:
+        // 09-26 read as expired on the 1st and was skipped.
+        //
+        // A contract is behind us once the calendar has moved past its expiry month. That is
+        // loose by up to a couple of weeks at the end, and deliberately so: this is a backstop,
+        // not the thing that picks the contract. The rollover table picks the contract.
         public bool IsExpiredAt(DateTime now)
         {
-            return ExpiryTicks != 0 && ExpiryTicks <= now.Ticks;
+            if (ExpiryTicks == 0)
+                return false;
+            DateTime expiry = new DateTime(ExpiryTicks);
+            return expiry.Year < now.Year || (expiry.Year == now.Year && expiry.Month < now.Month);
         }
 
         // A copy of this identity re-labelled as the result of a roll away from previous.
@@ -185,10 +199,15 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             return expiry.Ticks;
         }
 
+        // See InstrumentIdentity.IsExpiredAt: NT8 stores a futures expiry as the first of the
+        // delivery month, so this compares months, never the raw instant.
         public static bool IsExpired(Instrument instrument, DateTime now)
         {
             long ticks = ExpiryTicks(instrument);
-            return ticks != 0 && ticks <= now.Ticks;
+            if (ticks == 0)
+                return false;
+            DateTime expiry = new DateTime(ticks);
+            return expiry.Year < now.Year || (expiry.Year == now.Year && expiry.Month < now.Month);
         }
 
         // Recognises the NT8 "<root> MM-YY" form: everything before the last space is the root,
@@ -460,6 +479,11 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         // to exist and to expire strictly after now.
         // VERIFY ON COMPILE: MasterInstrument.RolloverCollection (List<Rollover>), Rollover.Date,
         // Rollover.ContractMonth, MasterInstrument.GetNextExpiry(DateTime).
+        // Written by FrontContract on the resolving thread and read by the status window for
+        // display only. Never used to make a decision, so a torn read costs nothing but a stale
+        // line of text; that is why there is no lock around it.
+        public static string LastRolloverNote = "";
+
         private static Instrument FrontContract(MasterInstrument master, DateTime now, out ResolutionMethod method, out string why)
         {
             method = ResolutionMethod.RolloverTable;
@@ -493,7 +517,16 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                 later.Sort(delegate (Rollover a, Rollover b) { return a.Date.CompareTo(b.Date); });
 
                 if (current != null)
+                {
                     candidates.Add(current.ContractMonth);
+                    LastRolloverNote = "rollover dated "
+                        + current.Date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
+                        + " names " + ContractMonthSuffix(current.ContractMonth);
+                }
+                else
+                {
+                    LastRolloverNote = "no rollover entry dated on or before today";
+                }
                 for (int i = 0; i < later.Count && candidates.Count < 4; i++)
                     candidates.Add(later[i].ContractMonth);
             }

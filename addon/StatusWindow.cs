@@ -279,8 +279,16 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                 if (id.IsExpiredAt(now))
                     sb.Append(" (EXPIRED)");
                 sb.Append("  ").Append(ShapeLabel(id.Shape));
+                sb.Append("  via ").Append(MethodLabel(id.ResolvedBy));
                 if (id.RollCount > 0)
                     sb.Append("  rolled x").Append(id.RollCount.ToString());
+            }
+            string note = InstrumentResolver.LastRolloverNote;
+            if (!string.IsNullOrEmpty(note))
+            {
+                if (sb.Length > 0)
+                    sb.Append(Environment.NewLine);
+                sb.Append("  ").Append(note);
             }
             for (int i = 0; i < unresolved.Length; i++)
             {
@@ -330,6 +338,22 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             return "No market data has arrived yet. Check that a feed is connected (Control Center > Connections),"
                  + " that the connection carries these instruments, and - outside session hours - that something is"
                  + " actually trading. Market Replay and Playback also count: press play.";
+        }
+
+        // Which of the four routes produced this contract. Worth a few characters on screen: a
+        // root that resolved to the wrong contract month looks identical to one that resolved to
+        // the right one until you know whether NinjaTrader's rollover table or a fallback chose
+        // it. The rollover line underneath says what that table actually contained.
+        private static string MethodLabel(ResolutionMethod method)
+        {
+            switch (method)
+            {
+                case ResolutionMethod.AsTyped: return "name as typed";
+                case ResolutionMethod.Nt8Default: return "NT8 default for the root";
+                case ResolutionMethod.RolloverTable: return "NT8 rollover table";
+                case ResolutionMethod.NextExpiry: return "nearest expiry (rollover table gave nothing)";
+                default: return "?";
+            }
         }
 
         private static string ShapeLabel(InstrumentShape shape)
