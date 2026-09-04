@@ -89,14 +89,17 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             Execution = null;
         }
 
-        // The default is a bare root, never a contract month: InstrumentResolver turns a root
-        // into the front contract at start and re-checks it for rolls (step 2.5). Any of the
-        // three accepted shapes may be listed: "<root> MM-YY" (used as typed), "<root>"
-        // (front contract), or a non-futures symbol (resolved directly).
+        // The default is a root plus a type hint, never a contract month: InstrumentResolver
+        // turns a root into the front contract at start and re-checks it for rolls (step 2.5).
+        // The hint is not decoration - a bare "ES" resolves to an equity of that ticker in
+        // NinjaTrader's database, not the CME future, so the default that ships with the AddOn
+        // says which one it means. Any of the four accepted shapes may be listed:
+        // "<root> MM-YY" (used as typed), "<root>:<type>" (front contract, type checked),
+        // "<root>" (front contract, whatever NT8 returns), or a non-futures symbol.
         public static Config CreateDefault()
         {
             Config c = new Config();
-            c.Instruments.Add("ES");
+            c.Instruments.Add("ES:Future");
             return c;
         }
 

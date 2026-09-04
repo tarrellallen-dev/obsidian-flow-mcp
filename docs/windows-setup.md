@@ -106,7 +106,7 @@ reported as unresolved rather than guessed at.
 A fully qualified name is used exactly as typed; a fully qualified name with a contract month is used exactly as typed, so an
 expired contract typed that way produces a connected pipe with no market data, which the status
 window's "Resolved as" row marks as EXPIRED and the events-drained row shows as zero. See
-`addon/README.md`, "Instrument names", for the three accepted shapes.
+`addon/README.md`, "Instrument names", for the four accepted shapes.
 
 ## 5. Point an MCP client at it
 

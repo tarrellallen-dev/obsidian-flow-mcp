@@ -688,8 +688,10 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         {
             InstrumentIdentity previous = current.Identity;
             string error;
+            // TypedEntry, not ResolvedFrom: the config entry still carries its type hint, and
+            // re-resolving a bare root would hand back a same-named equity and report it as a roll.
             InstrumentIdentity candidate = InstrumentResolver.Resolve(
-                previous.ResolvedFrom, now, previous.RolledAtUtcTicks, previous.RollCount, out error);
+                previous.TypedEntry, now, previous.RolledAtUtcTicks, previous.RollCount, out error);
 
             if (candidate == null)
             {

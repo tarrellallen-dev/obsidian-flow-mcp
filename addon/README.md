@@ -35,7 +35,7 @@ if it does not exist:
 
 ```json
 {
-  "instruments": [ "ES" ],
+  "instruments": [ "ES:Future" ],
   "pushRateHz": 100,
   "ringCapacity": 65536,
   "pipeName": "obsidian-flow-mcp-v1",
@@ -47,9 +47,9 @@ if it does not exist:
 }
 ```
 
-- `instruments` - one entry per instrument, in any of the three shapes described under
-  "Instrument names" below. The default is the bare root `ES`, which resolves to the front
-  contract; no contract month is written anywhere by the AddOn.
+- `instruments` - one entry per instrument, in any of the four shapes described under
+  "Instrument names" below. The default is `ES:Future`, a root plus a type hint, which resolves
+  to the front contract; no contract month is written anywhere by the AddOn.
 - an optional `execution` object (`enabled`, `allowUnarmedKillSwitch`) is parsed if present and
   acted on by nothing in this build step. Unknown keys are ignored rather than rejected.
 - `pushRateHz` - snapshot frames per second per instrument.
@@ -98,12 +98,13 @@ record** (resolved name, master instrument, instrument type, exchange, currency,
 size, point value, trading-hours template, how it was resolved, and roll history). That record
 goes into the hello frame, is returned by the `instruments` MCP tool, and is what recorded
 history is labelled with. Nothing in the AddOn assumes futures: equities, forex, crypto,
-indexes and CFDs go through the same path. Three shapes are accepted:
+indexes and CFDs go through the same path. Four shapes are accepted:
 
 | You type | Shape | What happens |
 |---|---|---|
 | `ES 12-26` (an example month) | fully qualified | Used exactly as typed via `Instrument.GetInstrument`. Never re-resolved; if the contract has expired the status window says so and no data will arrive. |
-| `ES`, `NQ`, `CL` | bare futures root | Resolved to the front contract and **re-checked for rolls** once a minute and at every session boundary. |
+| `ES:Future`, `NQ:Future` | root plus type hint | Resolved to the front contract and **re-checked for rolls** once a minute and at every session boundary. If NinjaTrader returns a different instrument type for that name, the entry is reported unresolved instead of subscribed to. This is the shape to use for futures. |
+| `ES`, `NQ`, `CL` | bare root | As above, but with no check on what came back. `GetInstrument("ES")` returns an equity on 8.1.8.2, so a bare root can subscribe to something other than the contract you meant. |
 | `MSFT`, `EURUSD`, `BTCUSD`, `^SPX` | direct (anything that is not a future) | Used exactly as typed. Never re-resolved. |
 
 Resolution order for a bare root, in `InstrumentResolver.Resolve`:
@@ -154,7 +155,7 @@ subscribed and the reason appears in the status window's connection row.
 | `Config.cs` | JSON config load/write, hand-rolled with no dependencies (see the comment at the top of the file) |
 | `MdEvent.cs` | Blittable ring slot struct |
 | `SpscRing.cs` | Single-producer/single-consumer ring, drop-newest on full |
-| `InstrumentResolver.cs` | Three config shapes to one identity record; front-contract resolution from NinjaTrader's own roll data; never assumes futures |
+| `InstrumentResolver.cs` | Four config shapes to one identity record; front-contract resolution from NinjaTrader's own roll data; never assumes futures |
 | `InstrumentFeed.cs` | Market data and market depth subscriptions, hot-path handlers; owns the feed's `MarketState` |
 | `Publisher.cs` | Publisher thread, named pipe server, frame serialization, roll detection and re-subscription; drains the rings into the calculators |
 | `MarketState.cs` | Per-instrument coordinator: session boundaries from the trading-hours template, history fold, price/VWAP/profile updates, step-3 serializer |

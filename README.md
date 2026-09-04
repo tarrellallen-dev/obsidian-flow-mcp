@@ -109,11 +109,16 @@ the server discards the table and waits for a fresh hello.
 ## Instrument names
 
 The AddOn config (`Documents\NinjaTrader 8\ObsidianFlow.OrderFlowMcp.json`) lists instruments
-in any of three shapes, and never assumes futures:
+in any of four shapes, and never assumes futures:
 
 - **fully qualified**, with a contract month, e.g. `ES 12-26` (an example month): used exactly
   as typed and never re-resolved;
-- **bare futures root**, e.g. `ES` (the default): resolved to the front contract using
+- **a root plus a type hint**, e.g. `ES:Future` (the default): resolved as a bare root is
+  below, with one addition - if the instrument NinjaTrader returns is not of the named type the
+  entry is reported unresolved rather than subscribed to. NinjaTrader's database holds an equity
+  with the ticker ES as well as the CME future, and `GetInstrument("ES")` returns the equity, so
+  this is the shape to use for a futures root;
+- **bare futures root**, e.g. `ES`: resolved to the front contract using
   NinjaTrader's own rollover data, re-checked once a minute and at every session boundary, and
   rolled to the new contract mid-session when it changes. A roll re-announces the instrument
   table on the same connection and emits a `contractRolled` event carrying both identities, so

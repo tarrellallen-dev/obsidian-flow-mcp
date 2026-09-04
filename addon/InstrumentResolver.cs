@@ -2,10 +2,13 @@
 // Step 2.5: instrument resolution for any asset class, and the identity record that labels
 // every frame, every archive row and every backtest report.
 //
-// Nothing in this file assumes futures. A config entry is one of three shapes:
+// Nothing in this file assumes futures. A config entry is one of four shapes:
 //   (a) fully qualified NT8 name with a contract month, e.g. "ES 12-26" (example) - used as-is;
-//   (b) a bare futures root, e.g. "ES" - resolved to the front contract, re-checked for rolls;
-//   (c) anything else (equities, forex, crypto, indexes, CFDs) - resolved directly.
+//   (b) a root plus a type hint, e.g. "ES:Future" - front contract, and the type NT8 returns
+//       must match the hint or the entry is reported unresolved rather than silently wrong;
+//   (c) a bare root, e.g. "ES" - front contract of whatever NT8 returns for that name, which
+//       for a ticker that is both a future and an equity is not necessarily the one meant;
+//   (d) anything else (equities, forex, crypto, indexes, CFDs) - resolved directly.
 // No contract month is ever derived by arithmetic on today's date: every month string sent to
 // Instrument.GetInstrument comes out of NinjaTrader's own rollover table or its own expiry
 // calculation. Resolution never throws; failure comes back as a reason string.
@@ -62,6 +65,14 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         // Not on the wire. The live NT8 object the feed subscribes with.
         public readonly Instrument Instrument;
 
+        // Not on the wire. The config entry exactly as written, type hint included - "ES:Future"
+        // where ResolvedFrom is "ES". Re-resolution on the roll clock must pass this back in,
+        // not ResolvedFrom: a bare "ES" hands back the equity, so an entry that resolved
+        // correctly at start would otherwise be re-resolved onto a stock a minute later and
+        // reported as a contract roll. ResolvedFrom stays the stripped name because that is what
+        // the wire, the archive labels and the server's instrument lookup use.
+        public readonly string TypedEntry;
+
         public InstrumentIdentity(
             string resolvedFrom,
             InstrumentShape shape,
@@ -69,7 +80,20 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             Instrument instrument,
             long rolledAtUtcTicks,
             ushort rollCount)
+            : this(resolvedFrom, resolvedFrom, shape, resolvedBy, instrument, rolledAtUtcTicks, rollCount)
         {
+        }
+
+        public InstrumentIdentity(
+            string typedEntry,
+            string resolvedFrom,
+            InstrumentShape shape,
+            ResolutionMethod resolvedBy,
+            Instrument instrument,
+            long rolledAtUtcTicks,
+            ushort rollCount)
+        {
+            TypedEntry = typedEntry ?? resolvedFrom ?? "";
             ResolvedFrom = resolvedFrom ?? "";
             Shape = shape;
             ResolvedBy = resolvedBy;
@@ -107,7 +131,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         public InstrumentIdentity AsRolledFrom(InstrumentIdentity previous, DateTime utcNow)
         {
             ushort count = previous == null ? (ushort)1 : (ushort)(previous.RollCount + 1);
-            return new InstrumentIdentity(ResolvedFrom, Shape, ResolvedBy, Instrument, utcNow.Ticks, count);
+            return new InstrumentIdentity(TypedEntry, ResolvedFrom, Shape, ResolvedBy, Instrument, utcNow.Ticks, count);
         }
 
         public string ExpiryText()
@@ -170,6 +194,24 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         // Recognises the NT8 "<root> MM-YY" form: everything before the last space is the root,
         // the tail is two digits, a dash, two digits. No date arithmetic; this only classifies
         // what the user typed.
+        // True when there is no hint to check, or the instrument is of the hinted type. A null
+        // instrument passes: the callers treat "not found" separately and report it better.
+        private static bool TypeMatches(Instrument candidate, string expectedType, string name, out string error)
+        {
+            error = null;
+            if (expectedType == null || candidate == null || candidate.MasterInstrument == null)
+                return true;
+
+            string actual = candidate.MasterInstrument.InstrumentType.ToString();
+            if (string.Equals(actual, expectedType, StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            error = "\"" + name + "\" resolves to a " + actual + " in NinjaTrader, not a "
+                  + expectedType + ". Name the contract in full (for example \"" + name
+                  + " 12-26\"), or correct the type hint.";
+            return false;
+        }
+
         public static bool HasContractMonth(string typed, out string root)
         {
             root = null;
@@ -205,6 +247,10 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         // Resolves one config entry. Returns null with a reason on failure; never throws.
         //
         // Resolution order:
+        //   0. A trailing ":<type>" is split off first and is not part of any lookup. It is a
+        //      hint, checked against whatever the steps below return; a mismatch is reported as
+        //      unresolved rather than subscribed to. The unsplit entry is kept on the identity
+        //      as TypedEntry so the roll clock can re-resolve with the hint still attached.
         //   1. Instrument.GetInstrument(typed).
         //      - typed carries a contract month: shape (a), used as-is even if expired (the
         //        user asked for that contract; the expiry is reported so it is visible).
@@ -231,7 +277,8 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                 return null;
             }
 
-            string name = typed.Trim();
+            string entry = typed.Trim();
+            string name = entry;
 
             // Optional type hint: "ES:Future". NinjaTrader's instrument database contains more
             // than one instrument called ES - the CME E-mini future and an equity with the same
@@ -258,17 +305,8 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             {
                 Instrument direct = Instrument.GetInstrument(name);
 
-                if (expectedType != null && direct != null && direct.MasterInstrument != null)
-                {
-                    string actual = direct.MasterInstrument.InstrumentType.ToString();
-                    if (!string.Equals(actual, expectedType, StringComparison.OrdinalIgnoreCase))
-                    {
-                        error = "\"" + name + "\" resolves to a " + actual + " in NinjaTrader, not a "
-                              + expectedType + ". Name the contract in full (for example \"" + name
-                              + " 12-26\"), or correct the type hint.";
-                        return null;
-                    }
-                }
+                if (!TypeMatches(direct, expectedType, name, out error))
+                    return null;
 
                 if (qualified)
                 {
@@ -277,14 +315,14 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                         error = "not in the NinjaTrader instrument database: " + name;
                         return null;
                     }
-                    return new InstrumentIdentity(name, InstrumentShape.FullyQualified, ResolutionMethod.AsTyped, direct, rolledAtUtcTicks, rollCount);
+                    return new InstrumentIdentity(entry, name, InstrumentShape.FullyQualified, ResolutionMethod.AsTyped, direct, rolledAtUtcTicks, rollCount);
                 }
 
                 if (direct != null && !IsExpiringType(direct.MasterInstrument))
-                    return new InstrumentIdentity(name, InstrumentShape.Direct, ResolutionMethod.AsTyped, direct, rolledAtUtcTicks, rollCount);
+                    return new InstrumentIdentity(entry, name, InstrumentShape.Direct, ResolutionMethod.AsTyped, direct, rolledAtUtcTicks, rollCount);
 
                 if (direct != null && !IsExpired(direct, now))
-                    return new InstrumentIdentity(name, InstrumentShape.Root, ResolutionMethod.Nt8Default, direct, rolledAtUtcTicks, rollCount);
+                    return new InstrumentIdentity(entry, name, InstrumentShape.Root, ResolutionMethod.Nt8Default, direct, rolledAtUtcTicks, rollCount);
 
                 // A root whose NT8 default is missing or expired: consult NT8's own roll data.
                 MasterInstrument master = direct != null ? direct.MasterInstrument : FindMasterByName(name);
@@ -302,7 +340,12 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                     error = "no live contract for root " + name + " (" + why + ")";
                     return null;
                 }
-                return new InstrumentIdentity(name, InstrumentShape.Root, method, front, rolledAtUtcTicks, rollCount);
+                // The hint is checked here as well as on the direct lookup above: this path is
+                // reached when GetInstrument returned nothing or an expired contract, and it
+                // must not be a way in for an instrument of the wrong type.
+                if (!TypeMatches(front, expectedType, name, out error))
+                    return null;
+                return new InstrumentIdentity(entry, name, InstrumentShape.Root, method, front, rolledAtUtcTicks, rollCount);
             }
             catch (Exception ex)
             {
