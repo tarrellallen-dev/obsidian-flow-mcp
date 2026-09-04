@@ -73,7 +73,7 @@ An ordinary PowerShell window is fine and is preferable to an elevated one: npm 
 administrator rights, and installing as Administrator can leave `node_modules` owned awkwardly.
 
 ```powershell
-cd "$env:USERPROFILE\Documents\nt8-the-boy-prodigy-orderflow-mcp\server"
+cd "<where you cloned the repository>\server"
 npm install
 npm run typecheck
 npm test
@@ -118,7 +118,7 @@ For your MCP client, edit its MCP server configuration file:
     "obsidian-flow-mcp": {
       "command": "node",
       "args": [
-        "C:\\Users\\<you>\\Documents\\nt8-the-boy-prodigy-orderflow-mcp\\server\\dist\\src\\index.js"
+        "C:\\Users\\<you>\\<where you cloned it>\\obsidian-flow-mcp\\server\\dist\\src\\index.js"
       ]
     }
   }
