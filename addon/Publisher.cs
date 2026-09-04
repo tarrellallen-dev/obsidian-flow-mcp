@@ -401,29 +401,31 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             accept.IsBackground = true;
             accept.Name = "ObsidianFlow.OrderFlowMcp.Accept";
 
-            // Hoisted: allocating this array inside the poll loop would allocate every 10 ms.
-            WaitHandle[] handles = new WaitHandle[] { done, _wake };
-
             bool stopping = false;
 
             try
             {
                 accept.Start();
 
+                // Deliberately NOT WaitHandle.WaitAny. On .NET Framework, WaitAny copies the
+                // handle array into a fresh SafeHandle array on every call, so polling it every
+                // AcceptPollMs allocated continuously while no client was attached - tens of
+                // megabytes over an idle session, which the AddOn's own allocation counter is
+                // what surfaced (2026-09-04). WaitOne on a single handle does not allocate, and
+                // the 10 ms poll already bounds how long a stop request waits, so _wake is only
+                // needed to shorten that wait, not to be waited on here.
                 for (;;)
                 {
-                    int signalled = WaitHandle.WaitAny(handles, AcceptPollMs);
-
-                    if (signalled == 0)
+                    if (done.WaitOne(AcceptPollMs))
                         break;                              // connected, or the accept threw
 
-                    if (signalled == 1 || _stopRequested)
+                    if (_stopRequested)
                     {
                         stopping = true;
                         break;
                     }
 
-                    // WaitHandle.WaitTimeout: nobody is attached yet. Keep the rings moving.
+                    // Nobody is attached yet. Keep the rings moving.
                     DrainAll();
                 }
             }
