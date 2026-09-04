@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  server:
+    name: Server (typecheck, tests, gates)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install
+        working-directory: server
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: server
+        run: npm run typecheck
+
+      - name: Tests
+        working-directory: server
+        run: npm test
+
+      - name: Build
+        working-directory: server
+        run: npm run build
+
+      # The AddOn is C# for .NET Framework 4.8 and can only be compiled by
+      # NinjaTrader itself, so CI cannot build it. These two gates are what CI
+      # can check about it, and they are the two that matter before a publish.
+      - name: Brand gate
+        run: node scripts/brand-gate.mjs
+
+      - name: Publish gate
+        run: node scripts/publish-gate.mjs

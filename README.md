@@ -47,6 +47,33 @@ harness, adapters, and execution. Those are build steps 5 through 10.
 No performance number has been measured, and none is published. See
 `docs/latency-methodology.md` for how any future number will be reported.
 
+## What is free, and what is not
+
+This repository is the whole server, the whole AddOn, and the wire format. It is not a demo of a
+paid product. The paid half is a separate adapter that the open server discovers at runtime; it
+is not in this repository and nothing here is disabled without it.
+
+| | This repository (Apache-2.0) | Obsidian Flow Developer tier |
+|---|---|---|
+| Price and tape state | built | same |
+| VWAP with standard-deviation bands | built | same |
+| Session volume profile: POC, 70% value area, developing checkpoints, HVN/LVN nodes | built | same |
+| Prior-session levels and naked POC | built | same |
+| Instrument resolution for any asset class, front-month roll | built | same |
+| Handler latency and allocation measurement | built | same |
+| Top-of-book summary; full ladder on request | build step 6 | same |
+| DOM dynamics: pulling, stacking, potential absorption | build step 6 | same |
+| Benchmark harness | build step 5 | same |
+| Iceberg and hidden-liquidity scoring | not included | build step 9 |
+| Absorption events | not included | build step 9 |
+| True Aggression node strength | not included | build step 9 |
+| Fixed-range and drawing-tool anchored profiles | not included | build step 9 |
+| SuperDOM column values | not included | build step 9 |
+| Gated order execution | build step 10 | same |
+
+"built" means it is in this repository today and covered by tests. A build-step number means it is
+specified and sequenced but not written yet; the Status section above says where the build is.
+
 ## Layout
 
 ```
