@@ -207,8 +207,9 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                 return true;
 
             error = "\"" + name + "\" resolves to a " + actual + " in NinjaTrader, not a "
-                  + expectedType + ". Name the contract in full (for example \"" + name
-                  + " 12-26\"), or correct the type hint.";
+                  + expectedType + ", and no " + expectedType + " named \"" + name
+                  + "\" is in the instrument database either. Check the type hint, or name the"
+                  + " contract in full (for example \"" + name + " 12-26\").";
             return false;
         }
 
@@ -303,6 +304,38 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
 
             try
             {
+                // With a type hint on a root, the typed master lookup goes first. Asking
+                // GetInstrument by name and then complaining about what came back is how this
+                // resolver used to behave, and it turned a correct config entry into an
+                // unresolved one: "ES:Future" would report that "ES" is a Stock and stop, with
+                // the futures master sitting one typed lookup away the whole time.
+                if (expectedType != null && !qualified)
+                {
+                    // Not root: HasContractMonth leaves it null unless a contract month was typed,
+                    // and this branch is the case where none was. name is the root here.
+                    MasterInstrument hinted = FindMasterByName(name, expectedType);
+                    if (hinted != null)
+                    {
+                        string hintedWhy;
+                        ResolutionMethod hintedMethod;
+                        Instrument hintedFront = FrontContract(hinted, now, out hintedMethod, out hintedWhy);
+                        if (hintedFront != null)
+                            return new InstrumentIdentity(entry, name, InstrumentShape.Root, hintedMethod, hintedFront, rolledAtUtcTicks, rollCount);
+
+                        // A master of the right type with no live contract is a real answer, and a
+                        // better one than falling through to a same-named instrument of another
+                        // type would be.
+                        if (!IsExpiringType(hinted))
+                        {
+                            Instrument plain = Instrument.GetInstrument(name);
+                            if (plain != null && TypeMatches(plain, expectedType, name, out error))
+                                return new InstrumentIdentity(entry, name, InstrumentShape.Direct, ResolutionMethod.AsTyped, plain, rolledAtUtcTicks, rollCount);
+                        }
+                        error = "no live contract for " + name + " as a " + expectedType + " (" + hintedWhy + ")";
+                        return null;
+                    }
+                }
+
                 Instrument direct = Instrument.GetInstrument(name);
 
                 if (!TypeMatches(direct, expectedType, name, out error))
@@ -325,7 +358,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                     return new InstrumentIdentity(entry, name, InstrumentShape.Root, ResolutionMethod.Nt8Default, direct, rolledAtUtcTicks, rollCount);
 
                 // A root whose NT8 default is missing or expired: consult NT8's own roll data.
-                MasterInstrument master = direct != null ? direct.MasterInstrument : FindMasterByName(name);
+                MasterInstrument master = direct != null ? direct.MasterInstrument : FindMasterByName(name, expectedType);
                 if (master == null)
                 {
                     error = "not in the NinjaTrader instrument database: " + name;
@@ -359,9 +392,64 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
         // (CS1503 on 2026-09-03), so there is no name lookup here. Step 1 of Resolve already
         // covers every root NT8 can resolve itself, and an unresolvable root is reported with a
         // reason rather than guessed at.
-        private static MasterInstrument FindMasterByName(string name)
+        // Name plus type to a MasterInstrument, which is the lookup that makes a type hint do
+        // something rather than merely complain. Instrument.GetInstrument(name) is name-only, so
+        // for a ticker held by more than one instrument - "ES" is both the CME future and an
+        // equity in NinjaTrader's own database - it returns whichever one the database hands back
+        // and there is no argument to say which was meant. MasterInstrument.DbGet takes the type,
+        // so "ES" plus Future reaches the futures master even when GetInstrument("ES") does not.
+        //
+        // Confirmed against NinjaTrader.Core.dll on 8.1.8.2 (2026-09-04):
+        //   public static MasterInstrument DbGet(string, InstrumentType, bool)
+        // The third argument is passed false deliberately and is never passed true: its meaning is
+        // not documented for NinjaScript, and the plausible readings include creating the record
+        // when it is absent. A null result is a normal answer here and is handled by the caller;
+        // writing to the owner's instrument database to satisfy a lookup would not be.
+        private static MasterInstrument FindMasterByName(string name, string expectedType)
         {
-            return null;
+            if (name == null || name.Length == 0 || expectedType == null)
+                return null;
+
+            InstrumentType type;
+            if (!TryParseInstrumentType(expectedType, out type))
+                return null;
+
+            try
+            {
+                MasterInstrument master = MasterInstrument.DbGet(name, type, false);
+                if (master == null)
+                    return null;
+                // Trust nothing: the row came back from a database lookup, so check it is the
+                // thing that was asked for before any of it is used.
+                if (!string.Equals(Safe(master.Name), name, StringComparison.OrdinalIgnoreCase))
+                    return null;
+                if (master.InstrumentType != type)
+                    return null;
+                return master;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
+        private static bool TryParseInstrumentType(string text, out InstrumentType type)
+        {
+            type = InstrumentType.Future;
+            if (text == null)
+                return false;
+            try
+            {
+                object parsed = Enum.Parse(typeof(InstrumentType), text.Trim(), true);
+                if (parsed == null)
+                    return false;
+                type = (InstrumentType)parsed;
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
         }
 
         // NT8's rollover table first (its own roll settings: the latest rollover whose date has

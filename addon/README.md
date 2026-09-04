@@ -90,7 +90,12 @@ NinjaTrader returns for that name), and any non-expiring symbol such as `AAPL`.
 Prefer the type hint for futures. NinjaTrader's instrument database holds both the CME E-mini
 future and an equity with the ticker ES, and `Instrument.GetInstrument("ES")` returns the equity,
 so a bare root subscribes to the wrong instrument without saying so. Verified on 8.1.8.2 on
-2026-09-04. A hint that does not match is reported as unresolved.
+2026-09-04.
+
+The hint is not just a check. `Instrument.GetInstrument` is name-only, so it has no argument for
+which ES was meant; `MasterInstrument.DbGet(name, InstrumentType, false)` does, and a hinted root
+goes through that first. The front contract is then taken from that master's own rollover data, as
+it is for any root. If no master of that type exists, the entry is reported unresolved and says so.
 
 
 Each `instruments` entry is resolved by `InstrumentResolver.cs` at start into an **identity
