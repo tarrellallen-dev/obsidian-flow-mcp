@@ -220,6 +220,24 @@ fee, slippage and latency models, is planned as a separate repository after the 
 It ships with no market data; users record frames with this AddOn or import their own history.
 Design note: `docs/roadmap/backtester-companion.md`.
 
+## Screenshots
+
+### NinjaTrader menu integration
+
+![Obsidian Flow MCP in the NinjaTrader menu](docs/screenshots/ninjatrader-menu-obsidian-flow-mcp.png)
+
+### AddOn status window
+
+![Obsidian Flow MCP status window](docs/screenshots/obsidian-flow-mcp-status-window.png)
+
+### Pipe smoke stream
+
+![Obsidian Flow MCP pipe smoke stream](docs/screenshots/obsidian-flow-mcp-pipe-smoke-stream.png)
+
+### AddOn and decoder pass
+
+![Obsidian Flow MCP status and decoder pass](docs/screenshots/obsidian-flow-mcp-status-and-pass.png)
+
 ## Licence
 
 Apache License 2.0. See `LICENSE`.
