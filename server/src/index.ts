@@ -17,6 +17,15 @@ import { z } from "zod";
 
 import { StateCache, profileView, type ProfileScope } from "./cache/stateCache.js";
 import { loadServerConfig, type ServerConfig } from "./config.js";
+import {
+  listNinjaScriptFiles,
+  nt8Paths,
+  readNinjaScriptFile,
+  scanNt8Logs,
+  scanStrategyConflicts,
+  strategyDebugBundle,
+  type ScriptKind,
+} from "./diagnostics/nt8Diagnostics.js";
 import { PipeClient, resolveEndpoint, type PipeClientOptions } from "./transport/pipeClient.js";
 
 export const SERVER_NAME = "obsidian-flow-mcp";
@@ -378,6 +387,118 @@ export function buildServer(cache: StateCache, config: ServerConfig = loadServer
         coverage: read.coverage,
       });
     },
+  );
+
+  // ----- Strategy Analyzer / NinjaScript diagnostics: read-only local evidence tools -----
+
+  const diagnosticsAnnotations = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
+
+  server.registerTool(
+    "nt8_environment",
+    {
+      title: "NT8 diagnostic environment",
+      description:
+        "Read-only diagnostic environment for NinjaTrader Strategy Analyzer work. Returns the " +
+        "NinjaTrader Documents paths this MCP will inspect, whether the live AddOn pipe is " +
+        "connected, and newest log/trace timestamps. This does not control the Strategy Analyzer UI; " +
+        "it gives an LLM the local evidence roots needed to debug strategies.",
+      inputSchema: {},
+      annotations: diagnosticsAnnotations,
+    },
+    async () => {
+      const paths = nt8Paths();
+      return json({
+        paths,
+        mcpHealth: cache.health(),
+      });
+    },
+  );
+
+  server.registerTool(
+    "ninja_script_files",
+    {
+      title: "NinjaScript files",
+      description:
+        "Lists read-only NinjaScript source files under Strategies, Indicators and AddOns with " +
+        "class names, namespaces and AddDataSeries requirements. Use this before reading a file.",
+      inputSchema: {
+        kind: z.enum(["strategies", "indicators", "addons", "all"]).default("all"),
+      },
+      annotations: diagnosticsAnnotations,
+    },
+    async ({ kind }) => json({ files: await listNinjaScriptFiles((kind ?? "all") as ScriptKind) }),
+  );
+
+  server.registerTool(
+    "ninja_script_read",
+    {
+      title: "Read NinjaScript source",
+      description:
+        "Reads one selected .cs file under Documents\\NinjaTrader 8\\bin\\Custom with line numbers. " +
+        "This is scoped to NinjaScript source only and is read-only.",
+      inputSchema: {
+        path: z.string().describe("Absolute path or path relative to bin/Custom, from ninja_script_files."),
+        maxChars: z.number().int().positive().max(200_000).optional().describe("Maximum characters to return. Default 80000."),
+      },
+      annotations: diagnosticsAnnotations,
+    },
+    async ({ path, maxChars }) => json(await readNinjaScriptFile(path, { maxChars })),
+  );
+
+  server.registerTool(
+    "strategy_conflict_scan",
+    {
+      title: "Strategy conflict scan",
+      description:
+        "Static scanner for common NinjaTrader Strategy Analyzer conflicts: hosted indicators that " +
+        "require AddDataSeries, duplicate class/enum names, missing CurrentBars guards, signal-name " +
+        "mismatches, and backup .cs files that still compile under bin\\Custom.",
+      inputSchema: {
+        strategy: z
+          .string()
+          .optional()
+          .describe("Strategy class/file/name fragment. Omit to scan the most recently modified strategy."),
+      },
+      annotations: diagnosticsAnnotations,
+    },
+    async ({ strategy }) => json(await scanStrategyConflicts(strategy)),
+  );
+
+  server.registerTool(
+    "nt8_log_scan",
+    {
+      title: "NT8 log scan",
+      description:
+        "Scans newest NinjaTrader log and trace files for high-signal strategy debugging evidence: " +
+        "compile errors, runtime exceptions, Strategy Analyzer context, order errors, and 'tried to " +
+        "load additional data' conflicts.",
+      inputSchema: {
+        query: z.string().optional().describe("Optional case-insensitive filter, such as a strategy name."),
+        maxFiles: z.number().int().positive().max(20).optional(),
+        maxFindings: z.number().int().positive().max(200).optional(),
+      },
+      annotations: diagnosticsAnnotations,
+    },
+    async ({ query, maxFiles, maxFindings }) => json({ findings: await scanNt8Logs({ query, maxFiles, maxFindings }) }),
+  );
+
+  server.registerTool(
+    "strategy_debug_bundle",
+    {
+      title: "Strategy debug bundle",
+      description:
+        "Builds the first evidence bundle a chat should request before proposing Strategy Analyzer " +
+        "fixes: selected strategy metadata, hosted indicators, conflict scan findings, latest log " +
+        "findings, line-numbered strategy source, and live MCP health. Read-only.",
+      inputSchema: {
+        strategy: z
+          .string()
+          .optional()
+          .describe("Strategy class/file/name fragment. Omit to bundle the most recently modified strategy."),
+      },
+      annotations: diagnosticsAnnotations,
+    },
+    async ({ strategy }) => json(await strategyDebugBundle(strategy)),
   );
 
   return server;
