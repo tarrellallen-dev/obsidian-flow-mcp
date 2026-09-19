@@ -55,6 +55,8 @@ if it does not exist:
 - `pushRateHz` - snapshot frames per second per instrument.
 - `ringCapacity` - per-ring slot count, rounded up to a power of two.
 - `pipeName` - the server side listens on `\\.\pipe\<pipeName>`.
+  The PG-13 UI companion listens separately on `\\.\pipe\<pipeName>-control` so UI inspection
+  cannot add pressure to the market-state stream.
 - `dumpTo` - optional, absent by default. A file path; when set, the publisher thread appends
   one CSV line per instrument and handler kind, plus one for its own serializer, every 10 s:
   `timestamp,instrument,kind,count,p50,p99,p999,max,allocPer1024,allocTotal`. Latency columns
@@ -163,6 +165,7 @@ subscribed and the reason appears in the status window's connection row.
 | `InstrumentResolver.cs` | Four config shapes to one identity record; front-contract resolution from NinjaTrader's own roll data; never assumes futures |
 | `InstrumentFeed.cs` | Market data and market depth subscriptions, hot-path handlers; owns the feed's `MarketState` |
 | `Publisher.cs` | Publisher thread, named pipe server, frame serialization, roll detection and re-subscription; drains the rings into the calculators |
+| `UiControlServer.cs` | Separate PG-13 UI companion pipe for window inventory, WPF snapshots, focusing, status-window open, and safe Strategy Analyzer/workspace actions; blocks live-order-like controls |
 | `MarketState.cs` | Per-instrument coordinator: session boundaries from the trading-hours template, history fold, price/VWAP/profile updates, step-3 serializer |
 | `PriceState.cs` | Last, aggressor, bid/ask, spread, session open/high/low, session and tape volume |
 | `VwapCalculator.cs` | Session VWAP with volume-weighted Welford variance and sigma bands |

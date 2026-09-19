@@ -23,6 +23,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
 
         private Config _config;
         private Publisher _publisher;
+        private UiControlServer _uiControl;
         private bool _running;
 
         private Engine()
@@ -46,6 +47,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
 
         public bool IsRunning { get { lock (_gate) { return _running; } } }
         public Publisher Publisher { get { lock (_gate) { return _publisher; } } }
+        public UiControlServer UiControl { get { lock (_gate) { return _uiControl; } } }
         public Config Config { get { lock (_gate) { return _config; } } }
 
         public string[] StartupMessages
@@ -120,6 +122,8 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
 
                 _publisher = new Publisher(_config, _feeds, _unresolved);
                 _publisher.Start();
+                _uiControl = new UiControlServer(_config);
+                _uiControl.Start();
                 _running = true;
             }
         }
@@ -154,6 +158,11 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                     try { _publisher.Dispose(); } catch (Exception) { }
                     try { live = _publisher.FeedsSnapshot(); } catch (Exception) { }
                     _publisher = null;
+                }
+                if (_uiControl != null)
+                {
+                    try { _uiControl.Dispose(); } catch (Exception) { }
+                    _uiControl = null;
                 }
 
                 if (live == null)

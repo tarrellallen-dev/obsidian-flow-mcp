@@ -1,8 +1,10 @@
 # Roadmap: Strategy Analyzer diagnostics MCP layer
 
-Status: planned. This is not present in the current MCP server. The current server exposes
-live AddOn market-structure state; this note records the next diagnostic layer needed for
-strategy debugging and Strategy Analyzer work.
+Status: V1 implemented for the public repo. The MCP now exposes read-only Strategy Analyzer
+evidence tools plus a PG-13 NinjaTrader UI companion lane. The UI lane can inspect/focus
+windows, snapshot WPF control trees, open the Obsidian Flow status window, and invoke safe
+workspace/Analyzer controls. It blocks live-order-like windows and controls; live execution is
+not part of this public build.
 
 ## What the owner needs
 
@@ -10,15 +12,14 @@ The MCP should let an LLM help diagnose why a NinjaTrader strategy is not behavi
 Strategy Analyzer. The LLM needs more than live market-state snapshots: it needs the evidence a
 human would gather while debugging a backtest.
 
-The target is not fragile UI control. The target is a read-only evidence bundle the model can
-inspect reliably:
+The core target is still a reliable evidence bundle the model can inspect:
 
 - strategy source code,
 - indicator dependencies,
 - NinjaTrader log and trace files,
 - Strategy Analyzer backtest logs,
 - exported Analyzer results,
-- screenshots when UI context is needed,
+- PG-13 UI snapshots when UI context is needed,
 - data-series requirements,
 - common NinjaScript conflict scans.
 
@@ -86,7 +87,7 @@ Support a user-provided folder for CSV/HTML/image exports from Strategy Analyzer
 
 The MCP can parse these files without controlling the Strategy Analyzer UI directly.
 
-## Proposed MCP tools
+## Implemented MCP tools
 
 ### `nt8_environment`
 
@@ -191,11 +192,42 @@ Builds a single JSON/Markdown evidence bundle for an LLM:
 
 This should be the default tool a chat calls before proposing fixes.
 
+### `nt8_ui_status`
+
+Checks whether the NinjaTrader-side UI companion pipe is available.
+
+### `nt8_ui_windows`
+
+Lists open NinjaTrader windows with title, WPF type, active/visible state and geometry.
+
+### `nt8_ui_snapshot`
+
+Returns a bounded text/control tree for a selected NinjaTrader WPF window. This gives the LLM
+Strategy Analyzer settings/results context without relying on external screen scraping.
+
+### `nt8_ui_focus`
+
+Brings a selected NinjaTrader window forward.
+
+### `nt8_ui_open_status`
+
+Opens or focuses the Obsidian Flow MCP status window.
+
+### `nt8_ui_invoke`
+
+Invokes a selected safe button/menu/toggle by a path from `nt8_ui_snapshot`. PG-13 safety blocks
+live-order-like controls and windows.
+
+### `nt8_ui_set_text`
+
+Sets a selected `TextBox` by a path from `nt8_ui_snapshot`. PG-13 safety blocks live-order-like
+controls and windows.
+
 ## What not to do first
 
-Do not make UI scraping the foundation. Strategy Analyzer is a desktop UI and direct visual
-inspection depends on screen access. The durable MCP path is evidence-based: logs, source,
-Analyzer logs, exports, and explicit screenshots.
+Do not make outside-the-process UI scraping the foundation. Strategy Analyzer is a desktop UI,
+but the durable path is evidence-based first, then in-process WPF snapshots/control through the
+AddOn when UI context matters.
 
 Do not let the MCP write or delete NinjaScript files in V1. The first diagnostic version is
 read-only. Fixes can be proposed as patches by the coding agent after the user approves.
@@ -228,5 +260,17 @@ Known conflict family to scan first:
 4. Add Strategy Analyzer export importer.
 5. Add Strategy Analyzer log discovery if the storage path is confirmed.
 6. Add `strategy_debug_bundle`.
-7. Only after that, consider an optional UI/screenshot companion for visual Strategy Analyzer
-   review.
+7. Add PG-13 UI companion pipe and tools for Strategy Analyzer/workspace assistance.
+
+## Product-tier direction, not in this public repo
+
+The paid/developer build can grow from this public surface into:
+
+- Analyzer run orchestration with parameter presets and saved run manifests,
+- export collectors for Strategy Analyzer result grids/trades/optimization tables,
+- strategy research notebooks connected to the local Hub/second-brain store,
+- C++ or native acceleration for proprietary calculation engines where profiling proves it
+  matters,
+- Python ingestion pipelines for macro/options/research datasets,
+- guarded execution workflows that require explicit user-side authorization outside the public
+  PG-13 repo.

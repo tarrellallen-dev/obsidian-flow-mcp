@@ -27,6 +27,7 @@ import {
   type ScriptKind,
 } from "./diagnostics/nt8Diagnostics.js";
 import { PipeClient, resolveEndpoint, type PipeClientOptions } from "./transport/pipeClient.js";
+import { sendUiControlRequest } from "./transport/uiControlClient.js";
 
 export const SERVER_NAME = "obsidian-flow-mcp";
 export const SERVER_VERSION = "0.4.0";
@@ -499,6 +500,123 @@ export function buildServer(cache: StateCache, config: ServerConfig = loadServer
       annotations: diagnosticsAnnotations,
     },
     async ({ strategy }) => json(await strategyDebugBundle(strategy)),
+  );
+
+  // ----- NinjaTrader UI companion: PG-13 control only, separate pipe from market data -----
+
+  const uiReadAnnotations = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
+  const uiActionAnnotations = { readOnlyHint: false, destructiveHint: false, openWorldHint: false };
+
+  const uiWindowInput = {
+    windowIndex: z.string().optional().describe("Window index from nt8_ui_windows. Prefer this when available."),
+    titleContains: z.string().optional().describe("Case-insensitive title/caption fragment, for example Strategy Analyzer."),
+    typeContains: z.string().optional().describe("Case-insensitive WPF/NTWindow type fragment."),
+  };
+
+  server.registerTool(
+    "nt8_ui_status",
+    {
+      title: "NT8 UI control status",
+      description:
+        "Checks the Obsidian Flow PG-13 UI control pipe inside NinjaTrader. This lane is for " +
+        "Strategy Analyzer/workspace assistance only and blocks live-order-like controls.",
+      inputSchema: {},
+      annotations: uiReadAnnotations,
+    },
+    async () => json(await sendUiControlRequest({ command: "ui.status" })),
+  );
+
+  server.registerTool(
+    "nt8_ui_windows",
+    {
+      title: "NT8 UI windows",
+      description:
+        "Lists open NinjaTrader WPF windows with titles, types and geometry so an LLM can find " +
+        "Strategy Analyzer, the Obsidian Flow window, logs, charts or editor panes.",
+      inputSchema: {},
+      annotations: uiReadAnnotations,
+    },
+    async () => json(await sendUiControlRequest({ command: "ui.windows" })),
+  );
+
+  server.registerTool(
+    "nt8_ui_snapshot",
+    {
+      title: "NT8 UI snapshot",
+      description:
+        "Returns a bounded WPF control/text tree for one NinjaTrader window. Use it to inspect " +
+        "Strategy Analyzer settings/results before proposing fixes. It does not click anything.",
+      inputSchema: {
+        ...uiWindowInput,
+        maxDepth: z.number().int().min(1).max(12).optional(),
+        maxNodes: z.number().int().min(1).max(1000).optional(),
+      },
+      annotations: uiReadAnnotations,
+    },
+    async ({ windowIndex, titleContains, typeContains, maxDepth, maxNodes }) =>
+      json(await sendUiControlRequest({ command: "ui.snapshot", windowIndex, titleContains, typeContains, maxDepth, maxNodes })),
+  );
+
+  server.registerTool(
+    "nt8_ui_focus",
+    {
+      title: "Focus NT8 window",
+      description:
+        "Brings a selected NinjaTrader window to the front. PG-13 helper for Strategy Analyzer " +
+        "inspection; no live trading controls are invoked.",
+      inputSchema: uiWindowInput,
+      annotations: uiActionAnnotations,
+    },
+    async ({ windowIndex, titleContains, typeContains }) =>
+      json(await sendUiControlRequest({ command: "ui.focus", windowIndex, titleContains, typeContains })),
+  );
+
+  server.registerTool(
+    "nt8_ui_open_status",
+    {
+      title: "Open Obsidian Flow status window",
+      description:
+        "Opens or focuses the Obsidian Flow MCP status window inside NinjaTrader.",
+      inputSchema: {},
+      annotations: uiActionAnnotations,
+    },
+    async () => json(await sendUiControlRequest({ command: "ui.openStatus" })),
+  );
+
+  server.registerTool(
+    "nt8_ui_invoke",
+    {
+      title: "Invoke NT8 UI element",
+      description:
+        "Invokes a button/menu/toggle from an nt8_ui_snapshot path. PG-13 safety blocks " +
+        "live-order-like controls and windows; use for Strategy Analyzer/workspace operations.",
+      inputSchema: {
+        ...uiWindowInput,
+        path: z.string().describe("Snapshot path of the target UI node, for example 0/2/1."),
+        action: z.enum(["click", "focus", "toggle"]).default("click"),
+      },
+      annotations: uiActionAnnotations,
+    },
+    async ({ windowIndex, titleContains, typeContains, path, action }) =>
+      json(await sendUiControlRequest({ command: "ui.invoke", windowIndex, titleContains, typeContains, path, action })),
+  );
+
+  server.registerTool(
+    "nt8_ui_set_text",
+    {
+      title: "Set NT8 text field",
+      description:
+        "Sets a TextBox from an nt8_ui_snapshot path. PG-13 safety blocks live-order-like " +
+        "controls/windows; intended for Strategy Analyzer filters/parameters and support workflows.",
+      inputSchema: {
+        ...uiWindowInput,
+        path: z.string().describe("Snapshot path of the target TextBox node."),
+        value: z.string().max(2000),
+      },
+      annotations: uiActionAnnotations,
+    },
+    async ({ windowIndex, titleContains, typeContains, path, value }) =>
+      json(await sendUiControlRequest({ command: "ui.setText", windowIndex, titleContains, typeContains, path, value })),
   );
 
   return server;

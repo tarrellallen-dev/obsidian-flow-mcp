@@ -21,6 +21,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
     public class StatusWindow : NTWindow
     {
         private readonly TextBlock _pipeName;
+        private readonly TextBlock _uiControl;
         private readonly TextBlock _connection;
         private readonly TextBlock _instruments;
         private readonly TextBlock _identities;
@@ -52,6 +53,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
 
             int row = 0;
             _pipeName = AddRow(grid, ref row, "Pipe");
+            _uiControl = AddRow(grid, ref row, "UI control");
             _connection = AddRow(grid, ref row, "Connection");
             _instruments = AddRow(grid, ref row, "Instruments");
             _identities = AddRow(grid, ref row, "Resolved as");
@@ -123,6 +125,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
             {
                 Engine engine = Engine.Instance;
                 Publisher publisher = engine.Publisher;
+                UiControlServer uiControl = engine.UiControl;
                 InstrumentFeed[] feeds = engine.Feeds;
                 UnresolvedInstrument[] unresolved = engine.Unresolved;
 
@@ -146,6 +149,7 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                 if (publisher == null)
                 {
                     _pipeName.Text = "-";
+                    _uiControl.Text = "-";
                     _connection.Text = engine.IsRunning ? "starting" : "stopped";
                     _eventsDrained.Text = "-";
                     _diagnosis.Text = "-";
@@ -161,6 +165,17 @@ namespace NinjaTrader.NinjaScript.AddOns.ObsidianFlowOrderFlowMcp
                 else
                 {
                     _pipeName.Text = "\\\\.\\pipe\\" + publisher.PipeName;
+                    if (uiControl == null)
+                        _uiControl.Text = "-";
+                    else
+                    {
+                        string uiText = "\\\\.\\pipe\\" + uiControl.PipeName
+                            + "  requests " + uiControl.Requests.ToString();
+                        string uiError = uiControl.LastError;
+                        if (!string.IsNullOrEmpty(uiError))
+                            uiText = uiText + "  last error: " + uiError;
+                        _uiControl.Text = uiText;
+                    }
 
                     string state = publisher.IsConnected ? "connected" : "waiting for client";
                     string lastError = publisher.LastError;
